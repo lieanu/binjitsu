@@ -49,6 +49,9 @@ class ROP(object):
         self.base = base
         self.align = max(e.elfclass for e in elfs)/8
         self.migrated = False
+        self.arch = None
+        self.mode = None
+        self.depth = 10
         meth = '_load_' + self.elfs[0].get_machine_arch()
         if not hasattr(self, meth):
             log.error("Cannot load rop gadgets for architecture %r" % self.elfs[0].get_machine_arch())
@@ -394,9 +397,154 @@ class ROP(object):
         file(self.__get_cachefile_name(elf),'w+').write(repr(data))
 
     def _load_x64(self):
-        self._load_x86()
+        self.arch = capstone.CS_ARCH_X86
+        self.mode = capstone.CS_MODE_64
+        self._load_x86_gadgets()
+        #self._load_x86()
 
     def _load_x86(self):
+        self.arch = capstone.CS_ARCH_X86
+        self.mode = capstone.CS_MODE_32
+        self._load_x86_gadgets()
+
+    def _load_x86_gadgets(self):
+        """Load all ROP gadgets for the selected ELF files
+        New feature: 1. Without ROPgadget
+                     2. Extract all gadgets, including ret, jmp, call, syscall, sysenter.
+        TODO:        1. Now only filter pop ret, add ret, leave ret, ret gadgets.
+                     2. Currently only searching the first elf image.
+        """
+        gadgets = {}
+        self.gadgets = {}
+        self.privots = {}
+        elf = self.elfs[0]
+        ROPgadget = [
+                        ["\xc3", 1, 1],               # ret
+                        ["\xc2[\x00-\xff]{2}", 3, 1]  # ret <imm>
+                        ]
+
+        ROPgadget += [
+                        ["\xff[\x20\x21\x22\x23\x26\x27]{1}", 2, 1], # jmp  [reg]
+                        ["\xff[\xe0\xe1\xe2\xe3\xe4\xe6\xe7]{1}", 2, 1], # jmp  [reg]
+                        ["\xff[\x10\x11\x12\x13\x16\x17]{1}", 2, 1], # jmp  [reg]
+                        ["\xff[\xd0\xd1\xd2\xd3\xd4\xd6\xd7]{1}", 2, 1]  # call  [reg]
+                        ]
+        ROPgadget += [
+                        ["\xcd\x80", 2, 1], # int 0x80
+                        ["\x0f\x34", 2, 1], # sysenter
+                        ["\x0f\x05", 2, 1], # syscall
+                        ]
+        for seg in elf.executable_segments:
+            gadgets.update(self._find_all_gadgets(seg, ROPgadget))
+
+        # filter gadgets just for pop, add *sp , ret, leave
+        frame_regs = ['ebp','esp'] if self.align == 4 else ['rbp','rsp']
+        for addr, insns in gadgets.items():
+            sp_move = 0
+            regs = []
+            flag = True
+            instruction = []
+            for insn in insns:
+                ops = insn.operands
+                instruction += [(insn.mnemonic + " " + insn.op_str).strip().replace("  ", " ")]
+                #print "0x%x:\t%s\t%s" % (addr, insn.mnemonic, insn.op_str)
+
+                if u"pop" == insn.mnemonic:
+                    if  ops[0].type == capstone.x86.X86_OP_REG :
+                        regs.append(insn.reg_name(ops[0].reg))
+                        sp_move += self.align
+                    else:
+                        flag = False
+                        break
+                elif u"add" == insn.mnemonic:
+                    if  len(ops) >=2 and ops[0].type == capstone.x86.X86_OP_REG \
+                            and insn.reg_name(ops[0].reg)[-2:] == "sp" \
+                            and ops[1].type == capstone.x86.X86_OP_IMM:
+                        sp_move += ops[1].imm
+                    else:
+                        flag = False
+                        break
+                elif u"ret" == insn.mnemonic and len(ops) == 0:
+                    sp_move += self.align
+                elif u"leave" == insn.mnemonic:
+                    sp_move += 999999999
+                    regs += frame_regs
+                else:
+                    flag = False
+
+            # Maybe most of the gadgets are invalid
+            if flag == True:
+                sign = True
+                for _, value in self.gadgets.items():
+                    if "".join(value["insns"]) == "".join(instruction):
+                        sign = False 
+                        break
+                if sign == True:
+                    self.gadgets[addr] = {  'insns': instruction, 
+                                            'regs': regs, 
+                                            'move': sp_move}
+
+            # Don't use 'pop esp' for pivots
+            if not set(['rsp','esp']) & set(regs):
+                self.privots[sp_move]  = addr
+        #
+        # HACK: Set up a special '.leave' helper.  This is so that
+        #       I don't have to rewrite __getattr__ to support this.
+        #
+        leave = self.search(regs = frame_regs, order = 'regs')
+        if leave and leave[1]['regs'] != frame_regs:
+            leave = None
+        self.leave = leave
+    
+    def _load_arm_gadgets():
+        gadgets = {}
+        self.gadgets = {}
+        self.privots = {}
+        elf = self.elfs[0]
+        
+        gadgetARM = []
+        if self.mode == capstone.CS_MODE_ARM:
+            gadgetARM = [
+                            ["[\x10-\x19\x1e]{1}\xff\x2f\xe1", 4, 4],  # bx   reg
+                            ["[\x30-\x39\x3e]{1}\xff\x2f\xe1", 4, 4],  # blx  reg
+                            ["[\x00-\xff]{1}\x80\xbd\xe8", 4, 4],      # pop {,pc}
+                            ["\x00-\xff]{3}\xef", 4, 4]                # svc
+                            ]
+        elif self.mode == capstone.CS_MODE_THUMB:
+            gadgetsARM = [
+                            ["[\x00\x08\x10\x18\x20\x28\x30\x38\x40\x48\x70]{1}\x47", 2, 2], # bx   reg
+                            ["[\x80\x88\x90\x98\xa0\xa8\xb0\xb8\xc0\xc8\xf0]{1}\x47", 2, 2], # blx  reg
+                            ["[\x00-\xff]{1}\xbd", 2, 2],                                    # pop {,pc}
+                            ["\x00-\xff]{1}\xef", 2, 2]                                      # svc
+                            ]
+        for seg in elf.executable_segments:
+            gadgets.update(self._find_all_gadgets(seg, ROPgadget))
+
+        # todo: filter gadgets for arm.
+        pass
+
+    def _find_all_gadgets(self, section, gadgets):
+        C_OP = 0
+        C_SIZE = 1
+        C_ALIGN = 2
+        
+        allgadgets = {}
+        for gad in gadgets:
+            allRef = [m.start() for m in re.finditer(gad[C_OP], section.data())]
+            for ref in allRef:
+                for i in range(self.depth):
+                    md = capstone.Cs(self.arch, self.mode)
+                    md.detail = True
+                    startAddress = section.header.p_vaddr + ref - (i*gad[C_ALIGN])
+                    decodes = md.disasm(section.data()[ref - (i*gad[C_ALIGN]):ref+gad[C_SIZE]], 
+                            section.header.p_vaddr + ref)
+                    ldecodes = list(decodes)
+                    if len(ldecodes) == 0:
+                        continue
+                    allgadgets[startAddress] = ldecodes
+        return allgadgets
+
+    def _load_x86_old(self):
         """Load all ROP gadgets for the selected ELF files"""
         #
         # We accept only instructions that look like these.
