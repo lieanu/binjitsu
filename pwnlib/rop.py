@@ -1,55 +1,385 @@
-"""Return Oriented Programming
-"""
-import hashlib
+#!/usr/bin/env python2
+# -*- coding:utf-8 -*-
+
 import os
 import re
 import sys
+import time
+import struct
+import capstone
+import hashlib
 import tempfile
 
-from .elf import ELF
-from .log import getLogger
-from .util import packing
+from .elf     import ELF
+from .util    import packing
+from .log     import getLogger
+
+from operator import itemgetter
+
+from barf.barf import BARF
+from barf.arch import arch
+from barf.analysis.gadget import RawGadget
+from barf.analysis.gadget.gadgetfinder import GadgetTreeNode
+from barf.analysis.gadget.gadgetverifier import GadgetVerifier
+from barf.core.reil import ReilMnemonic
+from barf.core.reil import ReilRegisterOperand
+from barf.core.reil import ReilEmptyOperand
+from barf.core.reil import ReilImmediateOperand
+from barf.core.reil import DualInstruction
+
+from barf.arch.x86.x86parser import X86Parser
+from barf.arch.x86.x86translator import FULL_TRANSLATION
+from barf.arch.x86.x86translator import LITE_TRANSLATION
 
 log = getLogger(__name__)
 
-class ROP(object):
-    """Class which simplifies the generation of ROP-chains.
+# File size more than 100kb, should be filter for performance trade off
+MAX_SIZE = 100
 
-    Example:
+class VerifyROP(GadgetVerifier):
 
-    .. code-block:: python
+    def __init__(self, code_analyzer, architecture_info):
+        self.STACK_MAX_LEN = 1024
+        super(VerifyROP, self).__init__(code_analyzer, architecture_info)
 
-       elf = ELF('ropasaurusrex')
-       rop = ROP(elf)
-       rop.read(0, elf.bss(0x80))
-       rop.dump()
-       # ['0x0000:        0x80482fc (read)',
-       #  '0x0004:       0xdeadbeef',
-       #  '0x0008:              0x0',
-       #  '0x000c:        0x80496a8']
-       str(rop)
-       # '\\xfc\\x82\\x04\\x08\\xef\\xbe\\xad\\xde\\x00\\x00\\x00\\x00\\xa8\\x96\\x04\\x08'
-    """
-    def __init__(self, elfs, base = None):
-        """
-        Arguments:
-            elfs(list): List of pwnlib.elf.ELF objects for mining
-        """
+    #first resolvable, second the path to resolve
+    def _verify_path(self, paths, cond=[]):
 
-        import ropgadget
+        result = []
+        for path in paths:
+            self.analyzer.reset(full=True)
+            for gadget in path:
+                for reil_instr in gadget.get_ir_instrs():
+                    if reil_instr.mnemonic == ReilMnemonic.RET:
+                        break
+                    self.analyzer.add_instruction(reil_instr)
 
-        # Permit singular ROP(elf) vs ROP([elf])
-        if isinstance(elfs, ELF):
-            elfs = [elfs]
-        elif isinstance(elfs, (str, unicode)):
-            elfs = [ELF(elfs)]
+            dst = set()
+            for i in path[-1].destination:
+                if isinstance(i, ReilRegisterOperand):
+                    dst.add(i.name)
 
-        self.elfs  = elfs
+            sat, rsp, stack_result = False, 0, []
+            if self._arch_info.architecture_mode == arch.ARCH_X86_MODE_64:
+                sat, rsp, stack_result = self._satisfy_x64(cond)
+            elif self._arch_info.architecture_mode == arch.ARCH_X86_MODE_32:
+                sat, rsp, stack_result = self._satisfy_x86(cond)
+
+            if sat:
+                result.append((path, rsp, stack_result))
+
+        return result
+
+    def _satisfy_x64(self, cond):
+       
+        r = {}
+        flag = False
+        if len(cond) > 0:
+            for (reg, value) in cond:
+                if reg == "rsp":
+                    flag = True
+                r[reg] = self.analyzer.get_register_expr(reg, mode="post")
+                self.analyzer.set_postcondition(r[reg] == value)
+
+        # if rsp not be specified, rbp shoud not be modified. 
+        if flag:
+            rbp_pre = self.analyzer.get_register_expr("rbp", mode="pre")
+            self.analyzer.set_precondition(rbp_pre == 0xdeadbeef)
+            rbp_con = self.analyzer.get_memory_expr(rbp_pre, 8)
+            self.analyzer.set_precondition(rbp_con == 0xbeef0000)
+
+            rbp_post = self.analyzer.get_register_expr("rbp", mode="post")
+            self.analyzer.set_postcondition(rbp_post == 0xdeadbeef)
+
+        rsp_pre = self.analyzer.get_register_expr("rsp", mode="pre")
+        rsp_post = self.analyzer.get_register_expr("rsp", mode="post")
+        self.analyzer.set_precondition(rsp_pre == 0)
+
+        stack = []
+        for i in xrange(self.STACK_MAX_LEN):
+            stack.append(self.analyzer.get_memory_expr(rsp_pre + i*8, 8))
+
+
+        stack_result = []
+        if self.analyzer.check() == 'sat':
+            for i in xrange(len(stack)):
+                t = self.analyzer.get_expr_value(stack[i])
+                if t != 0:
+                    stack_result.append((i, t))
+
+            rsp_val = self.analyzer.get_expr_value(rsp_post)
+
+            return (True, rsp_val, stack_result)
+        else:
+            return (False, 0, [])
+
+    def _satisfy_x86(self, cond):
+
+        r = {}
+        flag = False
+        if len(cond) > 0:
+            for (reg, value) in cond:
+                if reg == "esp":
+                    flag = True
+                r[reg] = self.analyzer.get_register_expr(reg, mode="post")
+                self.analyzer.set_postcondition(r[reg] == value)
+
+        # if esp not be specified, ebp shoud not be modified. 
+        if flag:
+            rbp_pre = self.analyzer.get_register_expr("ebp", mode="pre")
+            self.analyzer.set_precondition(ebp_pre == 0xdeadbeef)
+            ebp_con = self.analyzer.get_memory_expr(ebp_pre, 4)
+            self.analyzer.set_precondition(ebp_con == 0xbeef0000)
+
+            ebp_post = self.analyzer.get_register_expr("ebp", mode="post")
+            self.analyzer.set_postcondition(ebp_post == 0xdeadbeef)
+
+        esp_pre = self.analyzer.get_register_expr("esp", mode="pre")
+        esp_post = self.analyzer.get_register_expr("esp", mode="post")
+        self.analyzer.set_precondition(esp_pre == 0)
+
+        stack = []
+        for i in xrange(self.STACK_MAX_LEN):
+            stack.append(self.analyzer.get_memory_expr(esp_pre + i*4, 4))
+
+        stack_result = []
+        if self.analyzer.check() == "sat":
+            for i in xrange(len(stack)):
+                t = self.analyzer.get_expr_value(stack[i])
+                if t != 0:
+                    stack_result.append((i, t))
+
+            esp_val = self.analyzer.get_expr_value(esp_post)
+
+            return (True, esp_val, stack_result)
+        else:
+            return (False, 0, [])
+
+class ROP():
+
+    def __init__(self, filename, byte_depth=20, instrs_depth=7):
+        self.bin = BARF(filename)
+
+        self.elf = ELF(filename)
+        self.depth = 10
+        self._ir_trans = self.bin.ir_translator
+        self._parser = self.bin.disassembler._parser
+        self.verifier = VerifyROP(self.bin.code_analyzer, self.bin.arch_info)
+
+        #find gadgets.
+        self.candidates = None
+
+        self._file_too_big = False
+        if len(self.elf.file.read()) >= MAX_SIZE*1000:
+            self._file_too_big = True
+
+        if self.bin.binary.architecture == arch.ARCH_X86:
+            self.arch = capstone.CS_ARCH_X86
+            if self.bin.binary.architecture_mode == arch.ARCH_X86_MODE_64:
+                self.mode = capstone.CS_MODE_64
+            elif self.bin.binary.architecture_mode == arch.ARCH_X86_MODE_32:
+                self.mode = capstone.CS_MODE_32
+            gadgets = self._load_x86_gadgets()
+            self.__convert_to_REIL(gadgets)
+        elif self.bin.binary.architecture == arch.ARCH_ARM:
+            self.arch = capstone.CS_ARCH_ARM
+            pass
+        
+        # Using BARF to find gadgets, but it's too slow for large binary.
+        #self.candidates = self.bin.gadget_finder.find(self.bin.binary.ea_start, 
+                                                    #self.bin.binary.ea_end,
+                                                    #byte_depth=byte_depth,
+                                                    #instrs_depth=instrs_depth)
+        ###filter duplicate gadgets
+        #self.candidates = self.filter_duplicates()
+
+        #classified the gadgets
+        self.classified = self.do_classify()
+
+        #verify the gadgets
+        self.verified = self.do_verify()
+
         self._chain = []
-        self.base = base
-        self.align = max(e.elfclass for e in elfs)/8
-        self.migrated = False
-        self.__load()
+        self._gadget_graph = {}
+        self._build_graph()
+
+    def __filter_for_big_binary(self, gadgets):
+        '''Filter gadgets for big binary.
+        '''
+        new = []
+        pop   = re.compile(r'^pop (.{3})')
+        add   = re.compile(r'^add .sp, (\S+)$')
+        ret   = re.compile(r'^ret$')
+        leave = re.compile(r'^leave$')
+
+        valid = lambda insn: any(map(lambda pattern: pattern.match(insn), [pop,add,ret,leave]))
+
+        insns = [g.strip() for g in gadgets["gadget"].split(";")]
+        if all(map(valid, insns)):
+            new.append(gadgets)
+
+        return new
+
+    def for_debug_v(self):
+        for x in self.verified:
+            print hex(x.address), str(x), \
+                    "; ".join([str(dinstr.asm_instr) for dinstr in x.instrs])#, \
+        print len(self.verified)
+            
+
+    def for_debug_c(self):
+        for x in self.classified:
+            print hex(x.address), str(x), \
+                    "; ".join([str(dinstr.asm_instr) for dinstr in x.instrs]), \
+                    " +++++ssss: ",\
+                    " / ".join(str(one) for one in x.sources),\
+                    " +++++dddd: ",\
+                    " / ".join(str(one) for one in x.destination)
+
+
+    def for_debug_d(self):
+        print len(self.candidates)
+        for x in self.candidates:
+            print hex(x.address), "; ".join([str(dinstr.asm_instr) for dinstr in x.instrs])
+
+    def filter_duplicates(self):
+        gadgets = {}
+        for cand in self.candidates:
+            asm_instrs = " ; ".join([str(dinstr.asm_instr) for dinstr in cand.instrs])
+
+            if asm_instrs not in gadgets:
+                gadgets[asm_instrs] = cand
+
+        return [cand for asm_instrs, cand in gadgets.items()]
+
+    def do_classify(self):
+        classified = []
+
+        for gadget in self.candidates:
+            classified += self.bin.gadget_classifier.classify(gadget)
+
+        return classified
+
+    def do_verify(self):
+        verified = []
+
+        for gadget in self.classified:
+
+            # TODO: filter only ret instructions
+            #if gadget.get_ir_instrs()[-1].mnemonic != ReilMnemonic.RET:
+                #continue
+
+            valid = self.bin.gadget_verifier.verify(gadget)
+            
+            if valid:
+                gadget.is_valid = True
+                verified += [gadget]
+
+        return verified
+
+    def call(self, resolvable, arguments=()):
+
+        addr = self.resolve(resolvable)
+
+        if addr is None:
+            log.error("Could not resolve %r" % resolvable)
+
+        self._chain.append((addr, arguments))
+    
+    def _find_suitable_gg(self, gg, arglen):
+        for g, jump, _ in gg:
+            if jump >= arglen*4 + 4:
+                return (True, g, jump)
+
+        print "Cannot find out suitable gadget."
+        return (False, 0, 0)
+
+    def build(self):
+        result = ""
+        if self.bin.binary.architecture == arch.ARCH_X86:
+            if self.bin.binary.architecture_mode == arch.ARCH_X86_MODE_32:
+                result = self.__build_x86()
+            elif self.bin.binary.architecture_mode == arch.ARCH_X86_MODE_64:
+                result = self.__build_x64()
+        else:
+            raise NotImplementedError(self.__class__.__name__ + '.do_something')
+
+        return result
+
+    def __build_x86(self):
+        padding = ""
+
+        gg = self._verify_path(self._find_x86_paths())
+        gg = sorted(gg, key=itemgetter(1))
+
+        for index, (addr, arguments)  in enumerate(self._chain):
+            padding += struct.pack("<I", addr)
+            if not isinstance(arguments, tuple):
+                arguments = (arguments,)
+            arglen = len(arguments)
+            
+            r, g, jump = self._find_suitable_gg(gg, arglen)
+            if r:
+                compensation = jump - arglen - 4
+                padding += struct.pack("<I", g[0].address)
+
+                # for debug
+                print hex(g[0].address), \
+                        "jump: ", jump,\
+                        "; ".join([str(dinstr.asm_instr) for dinstr in g[0].instrs])
+
+                for i in xrange(jump/4 - 1):
+                    if i < arglen:
+                        if isinstance(arguments[i], int):
+                            padding += struct.pack("<i", arguments[i])
+                        elif isinstance(arguments[i], str):
+                            padding += arguments[i]
+                    else:
+                        padding += "A"*(compensation)
+
+        return padding
+
+    def __build_x64(self):
+        padding = ""
+
+        # The number of Arguments more than 6 ! Are you crazy?
+        # For GCC now, TODO: windows & mach
+        regs = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
+
+        for index, (addr, arguments) in enumerate(self._chain):
+            if not isinstance(arguments, tuple):
+                arguments = (arguments,)
+            arglen = len(arguments)
+            for i in range(arglen):
+                gadget = self.search("rsp", [regs[i]])[0]
+                if not gadget:
+                    print "gadget to reg %s not found!" % regs[i]
+                    sys.exit(0)
+
+                # for debug
+                print hex(gadget[0].address), \
+                        "; ".join([str(dinstr.asm_instr) for x in gadget for dinstr in x.instrs])
+
+                result = self._verify_path([gadget], cond=[(regs[i], arguments[i])])
+                # TODO: how about arrangement gadgets number > 2
+                result = result[0]
+                path, rsp, stack_result = result
+                padding += struct.pack("<Q", path[0].address)
+                
+                temp_padding = ""
+                for i in range(rsp-8):
+                    temp_padding += "A"
+
+                for pos, value in stack_result:
+                    pos = pos * 8
+                    temp_padding = temp_padding[:pos] + struct.pack("<Q", value) + temp_padding[pos + 8:]
+
+                padding += temp_padding
+
+            ret_address = struct.pack("<Q", addr)
+            padding += ret_address
+
+        return padding
 
     def resolve(self, resolvable):
         """Resolves a symbol to an address
@@ -61,293 +391,304 @@ class ROP(object):
             int containing address of 'resolvable', or None
         """
         if isinstance(resolvable, str):
-            for elf in self.elfs:
-                if resolvable in elf.symbols:
-                    return elf.symbols[resolvable]
+            if resolvable in self.elf.symbols:
+                return self.elf.symbols[resolvable]
         if isinstance(resolvable, (int,long)):
             return resolvable
         return None
 
-    def unresolve(self, value):
-        """Inverts 'resolve'.  Given an address, it attempts to find a symbol
-        for it in the loaded ELF files.  If none is found, it searches all
-        known gadgets, and returns the disassembly
+    def _build_graph(self):
+        for instr in self.verified:
 
-        Arguments:
-            value(int): Address to look up
-
-        Returns:
-            String containing the symbol name for the address, disassembly for a gadget
-            (if there's one at that address), or an empty string.
-        """
-        for elf in self.elfs:
-            for name, addr in elf.symbols.items():
-                if addr == value:
-                    return name
-
-        if value in self.gadgets:
-            return '; '.join(self.gadgets[value]['insns'])
-        return ''
-
-    def _output_struct(self, value, output):
-        next_index = len(output)
-
-        if isinstance(value, (int, long)):
-            return value
-        elif isinstance(value, (unicode, str)):
-            if isinstance(value, unicode):
-                value = value.encode('utf8')
-
-            while True:
-                value += '\x00'
-                if len(value) % self.align == 0:
+            dst = []
+            regmaps = self.bin.arch_info.alias_mapper
+            op_size = self.bin.arch_info.operand_size
+            for s in instr.destination:
+                if s.size != op_size:
+                    dst.append(regmaps[str(s)][0])
+                else:
+                    dst.append(str(s))
+            for instr_b in self.verified:
+                if instr == instr_b:
                     break
+                
+                src = []
+                for s in instr_b.sources:
+                    if isinstance(s, ReilRegisterOperand):
+                        if s.size != op_size:
+                            src.append(regmaps[str(s)][0])
+                        else:
+                            src.append(str(s))
+                instr_xor = list(set(dst) & set(src))
+                if len(instr_xor) != 0:
+                    try:
+                        self._gadget_graph[instr].add(instr_b)
+                    except KeyError:
+                        self._gadget_graph[instr] = set()
 
-            output.append([value])
-            return (next_index,)
-        elif isinstance(value, (tuple, list)):
-            l = []
-            output.append(l)
-            for v in value:
-                l.append(self._output_struct(v, output))
-            return (next_index,)
+    def _find_x86_paths(self):
+        return [ [instr] for instr in self.verified]
+
+
+    def search(self, src, regs):
+        start = set()
+        for instr in self.verified:
+            instr_srcs = [str(s) for s in instr.sources]
+            if src in instr_srcs:
+                start.add(instr)
+
+        end = set()
+        for instr in self.verified:
+            instr_dsts = [str(s) for s in instr.destination]
+            if (set(instr_dsts) & set(regs)) == set(regs):
+                end.add(instr)
+
+        paths = []
+        if len(start) != 0 and len(end) != 0:
+            for s in list(start):
+                for e in list(end):
+                    path = self._find_path(self._gadget_graph, s, e)
+                    paths += list(path)
+
+        # Sort by the key of instruction's length
+        paths = sorted(paths, key=lambda path: len("; ".join([str(dinstr.asm_instr) \
+                        for x in path  for dinstr in x.instrs])))
+        if len(paths) > 0:
+            return paths
         else:
-            log.error("ROP: Cannot flatten value %r" % value)
+            return None
 
-    def _build_x86(self):
-        # Stage 1:
-        #   Convert every call in self._chain from a (addr, args) tuple
-        #   into a (addr, pivot, args, pad) tuple.
-        #
-        # Stage 2:
-        #   Micro-optimizations for the last call in the chain.
-        #
-        # Stage 3:
-        #   Convert into a [[str/ints/refs]], where
-        #   refs are references to one of the first lists and will be turned
-        #   into pointers outside this function. Refs are represented as
-        #   length-1 tuples.
+    def _find_path(self, graph, start, end, path=[]):
+        '''DFS for find a path in gadget graph.
+        '''
+        path = path + [start]
 
-        if not self._chain:
-            return []
+        if start == end:
+            yield path
+        if not graph.has_key(start):
+            return
+        for node in graph[start]:
+            if node not in path:
+                for new_path in self._find_path(graph, node, end, path):
+                    if new_path:
+                        yield new_path
 
-        # Stage 1
-        chain = []
-        for addr, args in self._chain:
-            if not args:
-                chain.append([addr, [], [], 0])
-            else:
-                need = (1+len(args)) * self.align
-                best_pivot = None
-                best_size  = None
+    def _verify_path(self, paths, cond=[]):
+        return self.verifier._verify_path(paths, cond)
 
-                for size, pivot in sorted(self.pivots.items()):
-                    if size >= need:
-                        best_pivot = pivot
-                        best_size  = size
-                        break
+    def call_func(funcname, arguments=()):
+        pass
 
-                if best_pivot == None:
-                    log.error("Could not find gadget to clean up stack for call %r %r" % (addr, args))
+    def find_prdi(self):
+        paths = []
+        for x in self.verified:
+            instr = "; ".join([str(dinstr.asm_instr) for dinstr in x.instrs])
+            #if instr.strip() == "pop rdi; ret":
+            if instr.strip() == "mov eax, 0x0; leave; ret":
+                paths.append([x])
+        return paths
 
-                chain.append([addr, [best_pivot], args, best_size/4 - len(args) - 1])
+    def find_acall(self):
+        paths = []
+        for x in self.verified:
+            instr = "; ".join([str(dinstr.asm_instr) for dinstr in x.instrs])
+            if instr.strip() == "push rbp; mov rbp, rsp; call rax":
+                paths.append([x])
+        return paths
 
-        # Stage 2
-        # If the last call has arguments, there is no need
-        # to fix up the stack up for those arguments
-        if chain[-1][2]:
-            chain[-1][1] = [0xdeadbeef]
-            chain[-1][3] = 0
+    def filter_gadgets(self):
+        filter = []
+        for x in self.verified:
+            if x.get_ir_instrs()[-1].mnemonic != ReilMnemonic.RET:
+                print "; ".join([str(d.asm_instr) for d in x.instrs])
+                filter.append(x)
+        self.verified = filter
 
-        # If the last call does not have any arguments, there is no
-        # need to fix up the stack for the second-to-last call.
-        # We can put the last call as the pivot address for
-        # the second-to-last call.
-        if len(chain) > 1 and not chain[-1][2] and chain[-2][2]:
-            # This optimization does not work if a raw string is on the stack
-            if not isinstance(chain[-1][0], (str, unicode)):
-                chain[-2][1] = [chain[-1][0]]
-                chain[-2][3] = 0
-                chain.pop()
-
-        # Stage 3
-        outrop = []
-        output = [outrop]
-
-        for addr, pivot, args, pad in chain:
-            outrop.append(addr)
-            outrop.extend(pivot)
-            for arg in args:
-                outrop.append(self._output_struct(arg, output))
-            for _ in range(pad):
-                outrop.append('$$$$')
-
-        return output
-
-    _build_i386 = _build_x86
-
-    def build(self, base = None):
-        """Build the ROP chain into a list (addr, int/string, bool), where the
-        last value is True iff the value was an internal reference.
-
-        It is guaranteed that the individual parts are next to each other.
-
-        If there is no base available, then the returned addresses are indexed from 0.
-
-        Arguments:
-          base(int): The base address to build the rop-chain from. Defaults to
-                     self.base.
+    def _load_x86_gadgets(self):
+        """Load all ROP gadgets for the selected ELF files
+        New feature: 1. Without ROPgadget
+                     2. Extract all gadgets, including ret, jmp, call, syscall, sysenter.
         """
+        #self._parser = X86Parser(architecture_mode=self.bin.binary.architecture_mode)
 
-        if base == None:
-            base = self.base
 
-        # Use the architecture specific builder to get a [[str/ints/refs]]
-        meth = '_build_' + self.elfs[0].get_machine_arch()
-        if not hasattr(self, meth):
-            log.error("Cannot build rop for architecture %r" % self.elfs[0].get_machine_arch())
-        rop = getattr(self, meth)()
+        gadgets = []
+        elf = self.elf
+        ROPgadget = [
+                        ["\xc3", 1, 1],               # ret
+                        #["\xc2[\x00-\xff]{2}", 3, 1],  # ret <imm>
+                        #["\xff[\x20\x21\x22\x23\x26\x27]{1}", 2, 1], # jmp  [reg]
+                        #["\xff[\xe0\xe1\xe2\xe3\xe4\xe6\xe7]{1}", 2, 1], # jmp  [reg]
+                        #["\xff[\x10\x11\x12\x13\x16\x17]{1}", 2, 1], # jmp  [reg]
+                        #["\xff[\xd0\xd1\xd2\xd3\xd4\xd6\xd7]{1}", 2, 1],  # call  [reg]
+                        #["\xcd\x80", 2, 1], # int 0x80
+                        #["\x0f\x34", 2, 1], # sysenter
+                        #["\x0f\x05", 2, 1], # syscall
+                        ]
+        for seg in elf.executable_segments:
+            gadgets += self._find_all_gadgets(seg, ROPgadget)
+       
+        gadgets = self.__passCleanX86(gadgets)
+        gadgets = self.__deduplicate(gadgets)
 
-        # Stage 1
-        #   Generate a dictionary {ref_id: addr}.
-        addrs = {}
-        if base != None:
-            addr = base
-            for i, l in enumerate(rop):
-                addrs[i] = addr
-                for v in l:
-                    if isinstance(v, (int, long, tuple)):
-                        addr += self.align
-                    else:
-                        addr += len(v)
+        #build for cache
+        data = {}
+        for gad in gadgets:
+            data[gad["address"]] = gad["bytes"]
+        self.__cache_save(self.elf, data)
 
-        # Stage 2:
-        #   Convert into [(addr, int/string, bool)]
-        addr = base or 0
-        out = []
-        for l in rop:
-            for v in l:
-                if isinstance(v, (int, long)):
-                    out.append((addr, v, False))
-                    addr += self.align
-                elif isinstance(v, str):
-                    out.append((addr, v, False))
-                    addr += len(v)
-                elif isinstance(v, tuple):
-                    if v[0] in addrs:
-                        out.append((addr, addrs[v[0]], True))
-                        addr += self.align
-                    elif base != None:
-                        log.error("ROP: References unknown structure index")
-                    else:
-                        log.error("ROP: Cannot use structures without a base address")
-                else:
-                    log.error("ROP: Unexpected value: %r" % v)
+        return gadgets
 
-        return out
+    def _find_all_gadgets(self, section, gadgets):
+        C_OP = 0
+        C_SIZE = 1
+        C_ALIGN = 2
+        
+        allgadgets = []
+        cache = self.__cache_load(self.elf)
+        if cache:
+            for k, v in cache.items():
+                md = capstone.Cs(self.arch, self.mode)
+                md.detail = True
+                decodes = md.disasm(v, k)
+                ldecodes = list(decodes)
+                gadget = ""
+                for decode in ldecodes:
+                    gadget += (decode.mnemonic + " " + decode.op_str + " ; ").replace("  ", " ")
+                if len(gadget) > 0:
+                    gadget = gadget[:-3]
+                    onegad = {}
+                    onegad["address"] = k
+                    onegad["gad_instr"] = ldecodes
+                    onegad["gadget"] = gadget
+                    onegad["bytes"] = v
+                    allgadgets += [onegad]
+            return allgadgets
 
-    def chain(self):
-        """Build the ROP chain
+        for gad in gadgets:
+            allRef = [m.start() for m in re.finditer(gad[C_OP], section.data())]
+            for ref in allRef:
+                for i in range(self.depth):
+                    md = capstone.Cs(self.arch, self.mode)
+                    md.detail = True
+                    startAddress = section.header.p_vaddr + ref - (i*gad[C_ALIGN])
+                    decodes = md.disasm(section.data()[ref - (i*gad[C_ALIGN]):ref+gad[C_SIZE]], 
+                                        startAddress)
+                    ldecodes = list(decodes)
+                    gadget = ""
+                    for decode in ldecodes:
+                        gadget += (decode.mnemonic + " " + decode.op_str + " ; ").replace("  ", " ")
+                    if len(gadget) > 0:
+                        gadget = gadget[:-3]
+                        if (startAddress % gad[C_ALIGN]) == 0:
+                            onegad = {}
+                            onegad["address"] = startAddress
+                            onegad["gad_instr"] = ldecodes
+                            onegad["gadget"] = gadget
+                            onegad["bytes"] = section.data()[ref - (i*gad[C_ALIGN]):ref+gad[C_SIZE]]
+                            if self._file_too_big:
+                                allgadgets += self.__filter_for_big_binary(onegad)
+                            else:
+                                allgadgets += [onegad]
 
-        Returns:
-            str containging raw ROP bytes
-        """
+        return allgadgets
 
-        return packing.flat(
-            [value for addr, value, was_ref in self.build()],
-            word_size = 8*self.align
-        )
+    def __convert_to_gadgets(self, cache):
+        for k, v in cache:
+            pass
 
-    def dump(self):
-        """Dump the ROP chain in an easy-to-read manner"""
-        result = []
+    def __checkInstructionBlackListedX86(self, insts):
+        bl = ["db", "int3", "call", "jmp", "nop", "jne", "jg", "jge"]
+        for inst in insts:
+            for b in bl:
+                if inst.split(" ")[0] == b:
+                    return True 
+        return False
 
-        rop = self.build(self.base or 0)
-        addrs = [addr for addr, value, was_ref in rop]
-        for addr, value, was_ref in rop:
-            if isinstance(value, str):
-                line   = "0x%04x: %16r" % (addr, value.rstrip('\x00'))
-            elif isinstance(value, (int, long)):
-                if was_ref:
-                    line = "0x%04x: %#16x (%+d)" % (
-                        addr,
-                        value,
-                        value - addr
-                    )
-                else:
-                    ref = self.unresolve(value)
-                    line = "0x%04x: %#16x%s" % (
-                        addr,
-                        value,
-                        (' (%s)' % ref) if ref else ''
-                    )
-            else:
-                log.error("ROP: ROP.build returned an unexpected value %r" % value)
+    def __checkMultiBr(self, insts, br):
+        count = 0
+        for inst in insts:
+            if inst.split()[0] in br:
+                count += 1
+        return count
 
-            result.append(line)
+    def __passCleanX86(self, gadgets, multibr=False):
+        new = []
+        # Only extract "ret" gadgets now.
+        #br = ["ret", "int", "sysenter", "jmp", "call"]
+        br = ["ret"]
+        for gadget in gadgets:
+            insts = gadget["gadget"].split(" ; ")
+            if len(insts) == 1 and insts[0].split(" ")[0] not in br:
+                continue
+            if insts[-1].split(" ")[0] not in br:
+                continue
+            if self.__checkInstructionBlackListedX86(insts):
+                continue
+            if not multibr and self.__checkMultiBr(insts, br) > 1:
+                continue
+            if len([m.start() for m in re.finditer("ret", gadget["gadget"])]) > 1:
+                continue
+            new += [gadget]
+        return new
+    
+    def __deduplicate(self, gadgets):
+        new, insts = [], []
+        for gadget in gadgets:
+            #print gadget
+            if gadget["gadget"] in insts:
+                continue
+            insts.append(gadget["gadget"])
+            new += [gadget]
+        return new
 
-        return '\n'.join(result)
+    def __convert_to_REIL(self, gadgets):
 
-    def call(self, resolvable, arguments=()):
-        """Add a call to the ROP chain
+        trans_mode_old = self._ir_trans.translation_mode
+        self._ir_trans.translation_mode = LITE_TRANSLATION
 
-        Arguments:
-            resolvable(str,int): Value which can be looked up via 'resolve',
-                or is already an integer.
-            arguments(list): List of arguments which can be passed to pack().
-                Alternately, if a base address is set, arbitrarily nested
-                structures of strings or integers can be provided.
-        """
-        if self.migrated:
-            log.error("Cannot append to a migrated chain")
+        new = []
+        for gadget in gadgets:
+            one = []
 
-        addr = self.resolve(resolvable)
+            # for debug
+            for gad in gadget["gad_instr"]:
+                
+                asm_instr = self.__to_translate(gad)
 
-        if addr is None:
-            log.error("Could not resolve %r" % resolvable)
+                if not asm_instr:
+                    continue
 
-        self._chain.append((addr, arguments))
+                self._ir_trans.reset()
+                try:
+                    ins_ir = self._ir_trans.translate(asm_instr)
+                except:
+                    continue
+                one.append(DualInstruction(asm_instr.address, asm_instr, ins_ir))
 
-    def raw(self, value):
-        """Adds a raw integer or string to the ROP chain.
+            new += [RawGadget(one)]
 
-        If your architecture requires aligned values, then make
-        sure that any given string is aligned!
+        self._ir_trans.translation_mode = trans_mode_old
+        self.candidates = new
 
-        Arguments:
-            data(int/str): The raw value to put onto the rop chain.
-        """
+    def __to_translate(self, gad):
+        address = gad.address
+        size = gad.size
+        mnemonic = gad.mnemonic.decode('ascii')
+        op_str = gad.op_str.decode('ascii')
 
-        if self.migrated:
-            log.error("Cannot append to a migrated chain")
+        asm = str(mnemonic + " " + op_str).strip()
+        if asm in ["repne", "rep", "lock", "data16"]:
+            asm, size = "", 0
 
-        self._chain.append((value, ()))
+        instr = self._parser.parse(asm) if asm else None
 
-    def migrate(self, next_base):
-        """Explicitly set $sp, by using a ``leave; ret`` gadget"""
+        if instr:
+            instr.address = address
+            instr.size = size
+            instr.bytes = str(gad.bytes)
 
-        if isinstance(next_base, ROP):
-            next_base = self.base
-
-        pop_sp = self.rsp or self.esp
-        pop_bp = self.rbp or self.ebp
-        leave  = self.leave
-
-        if pop_sp and len(pop_sp[1]['regs']) == 1:
-            self.raw(pop_sp[0])
-            self.raw(next_base)
-        elif pop_bp and leave and len(pop_bp[1]['regs']) == 1:
-            self.raw(pop_bp[0])
-            self.raw(next_base-4)
-            self.raw(leave[0])
-        else:
-            log.error("Cannot find the gadgets to migrate")
-
-        self.migrated = True
-
-    def __str__(self):
-        """Returns: Raw bytes of the ROP chain"""
-        return self.chain()
+        return instr
 
     def __get_cachefile_name(self, elf):
         basename = os.path.basename(elf.file.name)
@@ -378,184 +719,6 @@ class ROP(object):
         data = {k+elf.load_addr-elf.address:v for k,v in data.items()}
 
         file(self.__get_cachefile_name(elf),'w+').write(repr(data))
-
-    def __load(self):
-        """Load all ROP gadgets for the selected ELF files"""
-        #
-        # We accept only instructions that look like these.
-        #
-        # - leave
-        # - pop reg
-        # - add $sp, value
-        # - ret
-        #
-        # Currently, ROPgadget does not detect multi-byte "C2" ret.
-        # https://github.com/JonathanSalwan/ROPgadget/issues/53
-        #
-
-        pop   = re.compile(r'^pop (.{3})')
-        add   = re.compile(r'^add .sp, (\S+)$')
-        ret   = re.compile(r'^ret$')
-        leave = re.compile(r'^leave$')
-
-        #
-        # Validation routine
-        #
-        # >>> valid('pop eax')
-        # True
-        # >>> valid('add rax, 0x24')
-        # False
-        # >>> valid('add esp, 0x24')
-        # True
-        #
-        valid = lambda insn: any(map(lambda pattern: pattern.match(insn), [pop,add,ret,leave]))
-
-        #
-        # Currently, ropgadget.args.Args() doesn't take any arguments, and pulls
-        # only from sys.argv.  Preserve it through this call.  We also
-        # monkey-patch sys.stdout to suppress output from ropgadget.
-        #
-        argv    = sys.argv
-        stdout  = sys.stdout
-        class Wrapper:
-            def __init__(self, fd):
-                self._fd = fd
-            def write(self, s):
-                pass
-            def __getattr__(self, k):
-                return self._fd.__getattribute__(k)
-        gadgets = {}
-
-        for elf in self.elfs:
-            cache = self.__cache_load(elf)
-            if cache:
-                gadgets.update(cache)
-                continue
-
-            log.info_once("Loading gadgets for %r" % elf.path)
-
-            try:
-                sys.stdout = Wrapper(sys.stdout)
-
-                import ropgadget
-                sys.argv = ['ropgadget', '--binary', elf.path, '--only', 'add|pop|leave|ret', '--nojop', '--nosys']
-                args = ropgadget.args.Args().getArgs()
-                core = ropgadget.core.Core(args)
-                core.do_binary(elf.path)
-                core.do_load(0)
-            finally:
-                sys.argv   = argv
-                sys.stdout = stdout
-
-            elf_gadgets = {}
-            for gadget in core._Core__gadgets:
-
-                address = gadget['vaddr'] - elf.load_addr + elf.address
-                insns   = [g.strip() for g in gadget['gadget'].split(';')]
-
-                if all(map(valid, insns)):
-                    elf_gadgets[address] = insns
-            self.__cache_save(elf, elf_gadgets)
-            gadgets.update(elf_gadgets)
-
-        #
-        # For each gadget we decided to keep, find out how much it moves the stack,
-        # and log which registers it modifies.
-        #
-        self.gadgets = {}
-        self.pivots  = {}
-
-        frame_regs = ['ebp','esp'] if self.align == 4 else ['rbp','rsp']
-
-        for addr,insns in gadgets.items():
-            sp_move = 0
-            regs = []
-            for insn in insns:
-                if pop.match(insn):
-                    regs.append(pop.match(insn).group(1))
-                    sp_move += self.align
-                elif add.match(insn):
-                    sp_move += int(add.match(insn).group(1), 16)
-                elif ret.match(insn):
-                    sp_move += self.align
-                elif leave.match(insn):
-                    #
-                    # HACK: Since this modifies ESP directly, this should
-                    #       never be returned as a 'normal' ROP gadget that
-                    #       simply 'increments' the stack.
-                    #
-                    #       As such, the 'move' is set to a very large value,
-                    #       to prevent .search() from returning it unless $sp
-                    #       is specified as a register.
-                    #
-                    sp_move += 9999999999
-                    regs    += frame_regs
-
-            # Permit duplicates, because blacklisting bytes in the gadget
-            # addresses may result in us needing the dupes.
-            self.gadgets[addr] = {'insns': insns, 'regs': regs, 'move': sp_move}
-
-            # Don't use 'pop esp' for pivots
-            if not set(['rsp','esp']) & set(regs):
-                self.pivots[sp_move]  = addr
-
-        #
-        # HACK: Set up a special '.leave' helper.  This is so that
-        #       I don't have to rewrite __getattr__ to support this.
-        #
-        leave = self.search(regs = frame_regs, order = 'regs')
-        if leave and leave[1]['regs'] != frame_regs:
-            leave = None
-        self.leave = leave
-
-    def __repr__(self):
-        return "ROP(%r)" % self.elfs
-
-    def search(self, move = 0, regs = None, order = 'size'):
-        """Search for a gadget which matches the specified criteria.
-
-        Arguments:
-            move(int): Minimum number of bytes by which the stack
-                pointer is adjusted.
-            regs(list): Minimum list of registers which are popped off the
-                stack.
-            order(str): Either the string 'size' or 'regs'. Decides how to
-                order multiple gadgets the fulfill the requirements.
-
-        The search will try to minimize the number of bytes popped more than
-        requested, the number of registers touched besides the requested and
-        the address.
-
-        If ``order == 'size'``, then gadgets are compared lexicographically
-        by ``(total_moves, total_regs, addr)``, otherwise by ``(total_regs, total_moves, addr)``.
-
-        Returns:
-            A tuple of (address, info) in the same format as self.gadgets.items().
-        """
-
-        regs = set(regs or [])
-
-        # Search for an exact match, save the closest match
-        closest = None
-        closest_val = (float('inf'), float('inf'), float('inf'))
-        for a,i in self.gadgets.items():
-            cur_regs = set(i['regs'])
-            if regs == cur_regs and move == i['move']:
-                return (a, i)
-
-            if not (regs.issubset(cur_regs) and move <= i['move']):
-                continue
-
-            if order == 'size':
-                cur = (i['move'], len(i['regs']), a)
-            else:
-                cur = (len(i['regs']), i['move'], a)
-
-            if cur < closest_val:
-                closest = (a, i)
-                closest_val = cur
-
-        return closest
 
     def __getattr__(self, attr):
         """Helper to make finding ROP gadets easier.
@@ -601,7 +764,10 @@ class ROP(object):
         x86_suffixes = ['ax', 'bx', 'cx', 'dx', 'bp', 'sp', 'di', 'si',
                         'r8', 'r9', '10', '11', '12', '13', '14', '15']
         if all(map(lambda x: x[-2:] in x86_suffixes, attr.split('_'))):
-            return self.search(regs = attr.split('_'), order = 'regs')
+            gadgets = self.search("rsp", regs = attr.split('_'))
+            if gadgets:
+                self.__pretty_print(gadgets)
+            return gadgets
 
         #
         # Otherwise, assume it's a rop.call() shorthand
@@ -609,3 +775,46 @@ class ROP(object):
         def call(*args):
             return self.call(attr,args)
         return call
+
+    def __pretty_print(self, gadgets=[]):
+
+        i = 0
+        for gad in gadgets:
+            print "[%d]: " % i,
+            for g in gad:
+                print hex(g.address), "; ".join([str(dinstr.asm_instr) for dinstr in g.instrs])
+            i += 1
+
+if __name__ == "__main__":
+    ctime = time.time()
+
+    rop = ROP("pizza")
+    #rop = ROP("libc.so.6")
+    #rop = ROP("pwn200")
+
+    rop.for_debug_d()
+    #rop.for_debug_v()
+
+    # 64bit testing.
+    gadget = rop.search("rsp", ["rdi"])[0]
+    #gadget = rop.search("esp", ["eax"])
+    print "; ".join([str(dinstr.asm_instr) for x in gadget for dinstr in x.instrs])
+
+    rop.call(0xdeadbeef, (0x7fff87654321))
+    rop.call(0xffffffff44444444, (0x111, 0x222))
+    result = rop.build()
+    print result
+    print result.encode("hex")
+
+    # 32bit testing
+    #rop.call(0xdeadbeef, (1,2,3))
+    #rop.call(0xaaaabbbb, (5555, -2))
+    #rop.call(0xddddcccc, (0x7fffffff))
+    #result = rop.build()
+    #print result
+    #print result.encode('hex')
+
+    ctime = time.time() - ctime
+
+    print "Total time: ", ctime
+
