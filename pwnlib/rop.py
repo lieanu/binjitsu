@@ -169,15 +169,16 @@ class ROP():
         #find gadgets.
         self.candidates = None
 
-        self._file_too_big = False
+        self.need_filter = False
         if len(self.elf.file.read()) >= MAX_SIZE*1000:
-            self._file_too_big = True
+            self.need_filter = True
 
         if self.bin.binary.architecture == arch.ARCH_X86:
             self.arch = capstone.CS_ARCH_X86
             if self.bin.binary.architecture_mode == arch.ARCH_X86_MODE_64:
                 self.mode = capstone.CS_MODE_64
             elif self.bin.binary.architecture_mode == arch.ARCH_X86_MODE_32:
+                self.need_filter = True
                 self.mode = capstone.CS_MODE_32
             gadgets = self._load_x86_gadgets()
             self.__convert_to_REIL(gadgets)
@@ -203,7 +204,7 @@ class ROP():
         self._gadget_graph = {}
         self._build_graph()
 
-    def __filter_for_big_binary(self, gadgets):
+    def __filter_for_big_binary_or_elf32(self, gadgets):
         '''Filter gadgets for big binary.
         '''
         new = []
@@ -221,6 +222,8 @@ class ROP():
         return new
 
     def for_debug_v(self):
+        '''For debug verified gadgets.
+        '''
         for x in self.verified:
             print hex(x.address), str(x), \
                     "; ".join([str(dinstr.asm_instr) for dinstr in x.instrs])#, \
@@ -228,6 +231,8 @@ class ROP():
             
 
     def for_debug_c(self):
+        '''For debug classified gadgets.
+        '''
         for x in self.classified:
             print hex(x.address), str(x), \
                     "; ".join([str(dinstr.asm_instr) for dinstr in x.instrs]), \
@@ -238,11 +243,16 @@ class ROP():
 
 
     def for_debug_d(self):
+        '''For debug raw gadgets.
+        '''
         print len(self.candidates)
         for x in self.candidates:
             print hex(x.address), "; ".join([str(dinstr.asm_instr) for dinstr in x.instrs])
 
     def filter_duplicates(self):
+        '''Deduplicate gadgets.
+        Source from BARF project.
+        '''
         gadgets = {}
         for cand in self.candidates:
             asm_instrs = " ; ".join([str(dinstr.asm_instr) for dinstr in cand.instrs])
@@ -253,6 +263,9 @@ class ROP():
         return [cand for asm_instrs, cand in gadgets.items()]
 
     def do_classify(self):
+        '''Classify gadgets, using REIL emulator.
+        '''
+
         classified = []
 
         for gadget in self.candidates:
@@ -261,6 +274,8 @@ class ROP():
         return classified
 
     def do_verify(self):
+        '''Verify gadgets, using Code_Analyzer module of BARF.
+        '''
         verified = []
 
         for gadget in self.classified:
@@ -278,6 +293,8 @@ class ROP():
         return verified
 
     def call(self, resolvable, arguments=()):
+        '''Add a function to rop chain.
+        '''
 
         addr = self.resolve(resolvable)
 
@@ -287,6 +304,8 @@ class ROP():
         self._chain.append((addr, arguments))
     
     def _find_suitable_gg(self, gg, arglen):
+        '''Find gadgets, which esp jump just >= argument_length*4 + 4(ret) 
+        '''
         for g, jump, _ in gg:
             if jump >= arglen*4 + 4:
                 return (True, g, jump)
@@ -295,6 +314,8 @@ class ROP():
         return (False, 0, 0)
 
     def build(self):
+        '''Automatic build rop chain for binary.
+        '''
         result = ""
         if self.bin.binary.architecture == arch.ARCH_X86:
             if self.bin.binary.architecture_mode == arch.ARCH_X86_MODE_32:
@@ -307,6 +328,8 @@ class ROP():
         return result
 
     def __build_x86(self):
+        '''Build rop chain for elf x86.
+        '''
         padding = ""
 
         gg = self._verify_path(self._find_x86_paths())
@@ -340,6 +363,8 @@ class ROP():
         return padding
 
     def __build_x64(self):
+        '''Build rop chain for elf x86.
+        '''
         padding = ""
 
         # The number of Arguments more than 6 ! Are you crazy?
@@ -398,6 +423,8 @@ class ROP():
         return None
 
     def _build_graph(self):
+        '''Build gadgets graph, gadget as vertex, reg as edge.
+        '''
         for instr in self.verified:
 
             dst = []
@@ -426,11 +453,17 @@ class ROP():
                     except KeyError:
                         self._gadget_graph[instr] = set()
 
-    def _find_x86_paths(self):
+    def __find_x86_paths(self):
+        '''Search paths for ELF32, now only support single instruction arrangement.
+        TODO: two more gadgets arrangement support.
+        '''
         return [ [instr] for instr in self.verified]
 
 
     def search(self, src, regs):
+        '''Search paths, from src to regs.
+        Example: search("rsp", ["rdi"]), such as gadget "pop rdi; ret" will be return to us.
+        '''
         start = set()
         for instr in self.verified:
             instr_srcs = [str(s) for s in instr.sources]
@@ -447,7 +480,7 @@ class ROP():
         if len(start) != 0 and len(end) != 0:
             for s in list(start):
                 for e in list(end):
-                    path = self._find_path(self._gadget_graph, s, e)
+                    path = self.__find_path(self._gadget_graph, s, e)
                     paths += list(path)
 
         # Sort by the key of instruction's length
@@ -458,7 +491,7 @@ class ROP():
         else:
             return None
 
-    def _find_path(self, graph, start, end, path=[]):
+    def __find_path(self, graph, start, end, path=[]):
         '''DFS for find a path in gadget graph.
         '''
         path = path + [start]
@@ -469,40 +502,14 @@ class ROP():
             return
         for node in graph[start]:
             if node not in path:
-                for new_path in self._find_path(graph, node, end, path):
+                for new_path in self.__find_path(graph, node, end, path):
                     if new_path:
                         yield new_path
 
     def _verify_path(self, paths, cond=[]):
+        '''Verify paths, get the rsp(esp) jump value, and the value on stack.
+        '''
         return self.verifier._verify_path(paths, cond)
-
-    def call_func(funcname, arguments=()):
-        pass
-
-    def find_prdi(self):
-        paths = []
-        for x in self.verified:
-            instr = "; ".join([str(dinstr.asm_instr) for dinstr in x.instrs])
-            #if instr.strip() == "pop rdi; ret":
-            if instr.strip() == "mov eax, 0x0; leave; ret":
-                paths.append([x])
-        return paths
-
-    def find_acall(self):
-        paths = []
-        for x in self.verified:
-            instr = "; ".join([str(dinstr.asm_instr) for dinstr in x.instrs])
-            if instr.strip() == "push rbp; mov rbp, rsp; call rax":
-                paths.append([x])
-        return paths
-
-    def filter_gadgets(self):
-        filter = []
-        for x in self.verified:
-            if x.get_ir_instrs()[-1].mnemonic != ReilMnemonic.RET:
-                print "; ".join([str(d.asm_instr) for d in x.instrs])
-                filter.append(x)
-        self.verified = filter
 
     def _load_x86_gadgets(self):
         """Load all ROP gadgets for the selected ELF files
@@ -540,6 +547,8 @@ class ROP():
         return gadgets
 
     def _find_all_gadgets(self, section, gadgets):
+        '''Find gadgets like ROPgadget do.
+        '''
         C_OP = 0
         C_SIZE = 1
         C_ALIGN = 2
@@ -586,16 +595,12 @@ class ROP():
                             onegad["gad_instr"] = ldecodes
                             onegad["gadget"] = gadget
                             onegad["bytes"] = section.data()[ref - (i*gad[C_ALIGN]):ref+gad[C_SIZE]]
-                            if self._file_too_big:
-                                allgadgets += self.__filter_for_big_binary(onegad)
+                            if self.need_filter:
+                                allgadgets += self.__filter_for_big_binary_or_elf32(onegad)
                             else:
                                 allgadgets += [onegad]
 
         return allgadgets
-
-    def __convert_to_gadgets(self, cache):
-        for k, v in cache:
-            pass
 
     def __checkInstructionBlackListedX86(self, insts):
         bl = ["db", "int3", "call", "jmp", "nop", "jne", "jg", "jge"]
@@ -635,7 +640,6 @@ class ROP():
     def __deduplicate(self, gadgets):
         new, insts = [], []
         for gadget in gadgets:
-            #print gadget
             if gadget["gadget"] in insts:
                 continue
             insts.append(gadget["gadget"])
@@ -643,6 +647,8 @@ class ROP():
         return new
 
     def __convert_to_REIL(self, gadgets):
+        '''Convert raw gadgets into REIL instructions
+        '''
 
         trans_mode_old = self._ir_trans.translation_mode
         self._ir_trans.translation_mode = LITE_TRANSLATION
@@ -788,31 +794,32 @@ class ROP():
 if __name__ == "__main__":
     ctime = time.time()
 
-    rop = ROP("pizza")
     #rop = ROP("libc.so.6")
-    #rop = ROP("pwn200")
+    debug_64 = False
+    
+    if debug_64:
+        rop = ROP("../start/pizza")
+        rop.for_debug_d()
 
-    rop.for_debug_d()
-    #rop.for_debug_v()
+        # 64bit testing.
+        gadget = rop.search("rsp", ["rdi"])[0]
+        print "; ".join([str(dinstr.asm_instr) for x in gadget for dinstr in x.instrs])
 
-    # 64bit testing.
-    gadget = rop.search("rsp", ["rdi"])[0]
-    #gadget = rop.search("esp", ["eax"])
-    print "; ".join([str(dinstr.asm_instr) for x in gadget for dinstr in x.instrs])
-
-    rop.call(0xdeadbeef, (0x7fff87654321))
-    rop.call(0xffffffff44444444, (0x111, 0x222))
-    result = rop.build()
-    print result
-    print result.encode("hex")
-
-    # 32bit testing
-    #rop.call(0xdeadbeef, (1,2,3))
-    #rop.call(0xaaaabbbb, (5555, -2))
-    #rop.call(0xddddcccc, (0x7fffffff))
-    #result = rop.build()
-    #print result
-    #print result.encode('hex')
+        rop.call(0xdeadbeef, (0x7fff87654321))
+        rop.call(0xffffffff44444444, (0x111, 0x222))
+        result = rop.build()
+        print result
+        print result.encode("hex")
+    else:
+        # 32bit testing
+        rop = ROP("../start/pwn200")
+        rop.for_debug_d()
+        rop.call(0xdeadbeef, (1,2,3))
+        rop.call(0xaaaabbbb, (5555, -2))
+        rop.call(0xddddcccc, (0x7fffffff))
+        result = rop.build()
+        print result
+        print result.encode('hex')
 
     ctime = time.time() - ctime
 
