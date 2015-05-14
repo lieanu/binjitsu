@@ -602,7 +602,6 @@ class ROP():
 
                     # TODO: how about arrange gadgets number >2
                     path, sp, stack_result = result
-                    print path, sp, stack_result
                     outrop.append(path[0].address)
 
                     for pos, value in stack_result:
@@ -785,7 +784,7 @@ class ROP():
         for elf in self.elfs:
             gadgets = []
             for seg in elf.executable_segments:
-                gadgets += self.__find_all_gadgets(seg, gadget_RE)
+                gadgets += self.__find_all_gadgets(seg, gadget_RE, elf)
        
             gadgets = self.__passCleanX86(gadgets)
             gadgets = self.__deduplicate(gadgets)
@@ -827,7 +826,7 @@ class ROP():
             for elf in self.elfs:
                 gadgets = []
                 for seg in elf.executable_segments:
-                    gadgets += self.__find_all_gadgets(seg, gadget_RE)
+                    gadgets += self.__find_all_gadgets(seg, gadget_RE, elf)
 
                 gadgets = self.__deduplicate(gadgets)
 
@@ -841,7 +840,7 @@ class ROP():
 
         return out
 
-    def __find_all_gadgets(self, section, gadgets):
+    def __find_all_gadgets(self, section, gadgets, elf):
         '''Find gadgets like ROPgadget do.
         '''
         C_OP = 0
@@ -849,7 +848,7 @@ class ROP():
         C_ALIGN = 2
         
         allgadgets = []
-        cache = self.__cache_load(self.elf)
+        cache = self.__cache_load(elf)
         if cache:
             for k, v in cache.items():
                 md = capstone.Cs(self.arch, self.mode)
@@ -875,7 +874,7 @@ class ROP():
                 for i in range(self.depth):
                     md = capstone.Cs(self.arch, self.mode)
                     #md.detail = True
-                    startAddress = section.header.p_vaddr + ref - (i*gad[C_ALIGN])
+                    startAddress = elf.address + section.header.p_vaddr + ref - (i*gad[C_ALIGN])
                     decodes = md.disasm(section.data()[ref - (i*gad[C_ALIGN]):ref+gad[C_SIZE]], 
                                         startAddress)
                     ldecodes = list(decodes)
