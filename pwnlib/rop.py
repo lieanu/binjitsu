@@ -15,6 +15,7 @@ from .util    import packing
 from .log     import getLogger
 
 from operator import itemgetter
+from copy     import deepcopy
 
 from barf.barf import BARF
 from barf.arch import arch
@@ -38,9 +39,10 @@ MAX_SIZE = 100
 
 class VerifyROP(GadgetVerifier):
 
-    def __init__(self, code_analyzer, architecture_info):
+    def __init__(self, code_analyzer, architecture_info, binary_arch):
         # Simulate a stack.
         self.STACK_MAX_LEN = 1024
+        self.arch = binary_arch
         super(VerifyROP, self).__init__(code_analyzer, architecture_info)
 
     #first resolvable, second the path to resolve
@@ -61,15 +63,54 @@ class VerifyROP(GadgetVerifier):
                     dst.add(i.name)
 
             sat, rsp, stack_result = False, 0, []
-            if self._arch_info.architecture_mode == arch.ARCH_X86_MODE_64:
-                sat, rsp, stack_result = self._satisfy_x64(cond)
-            elif self._arch_info.architecture_mode == arch.ARCH_X86_MODE_32:
-                sat, rsp, stack_result = self._satisfy_x86(cond)
+            if self.arch == arch.ARCH_X86:
+                if self._arch_info.architecture_mode == arch.ARCH_X86_MODE_64:
+                    sat, rsp, stack_result = self._satisfy_x64(cond)
+                elif self._arch_info.architecture_mode == arch.ARCH_X86_MODE_32:
+                    sat, rsp, stack_result = self._satisfy_x86(cond)
+            elif self.arch == arch.ARCH_ARM:
+                if self._arch_info.architecture_mode == arch.ARCH_ARM_MODE_32:
+                    sat, rsp, stack_result = self._satisfy_arm(cond)
 
             if sat:
                 result.append((path, rsp, stack_result))
 
         return result
+
+    def _satisfy_arm(self, cond):
+
+        r = {}
+        flag = False
+        if len(cond) > 0:
+            for (reg, value) in cond:
+                if reg == "r13" or reg == "sp":
+                    flag = True
+                r[reg] = self.analyzer.get_register_expr(reg, mode="post")
+                self.analyzer.set_postcondition(r[reg] == value)
+
+        if not flag:
+            # TODO: how about jump to another buffer, like leave; ret in x86
+            pass
+
+        sp_pre = self.analyzer.get_register_expr("sp", mode="pre")
+        sp_post = self.analyzer.get_register_expr("sp", mode="post")
+        self.analyzer.set_precondition(sp_pre == 0)
+
+        stack = []
+        for i in xrange(self.STACK_MAX_LEN):
+            stack.append(self.analyzer.get_memory_expr(sp_pre + i*4, 4))
+
+        stack_result = []
+        if self.analyzer.check() == 'sat':
+            sp_val = self.analyzer.get_expr_value(sp_post)
+
+            for i in xrange((sp_val/4)):
+                t = self.analyzer.get_expr_value(stack[i])
+                stack_result.append((i, t))
+
+            return (True, sp_val, stack_result)
+        else:
+            return (False, 0, [])
 
     def _satisfy_x64(self, cond):
        
@@ -176,13 +217,13 @@ class ROP():
         self.depth = 10
         self._ir_trans = self.bin.ir_translator
         self._parser = self.bin.disassembler._parser
-        self.verifier = VerifyROP(self.bin.code_analyzer, self.bin.arch_info)
+        self.verifier = VerifyROP(self.bin.code_analyzer, self.bin.arch_info, self.bin.binary.architecture)
 
         #find gadgets.
         self.candidates = None
 
         self.need_filter = False
-        if len(self.elf.file.read()) >= MAX_SIZE*1000:
+        if self.bin.binary.architecture == arch.ARCH_X86 and len(self.elf.file.read()) >= MAX_SIZE*1000:
             self.need_filter = True
 
         if self.bin.binary.architecture == arch.ARCH_X86:
@@ -196,7 +237,8 @@ class ROP():
             self.__convert_to_REIL(gadgets)
         elif self.bin.binary.architecture == arch.ARCH_ARM:
             self.arch = capstone.CS_ARCH_ARM
-            pass
+            gadgets = self.__load_arm_gadgets()
+            self.__convert_to_REIL(gadgets)
         
         #classified the gadgets
         self.classified = self.do_classify()
@@ -508,7 +550,7 @@ class ROP():
                     result = self.__verify_path([gadget], cond=[(regs[i], arguments[i])])
                     result = result[0]
 
-                    # FIX Done: how about arrangement gadgets number > 2
+                    # FIX Done: how about arrange gadgets number > 2
                     rsp = 0
                     know = {}
                     for gad in gadget:
@@ -536,7 +578,40 @@ class ROP():
     _build_amd64 = __build_x64
 
     def __build_arm(self):
-        pass
+        outrop = []
+        output = [outrop]
+
+        regs = ["r0", "r1", "r2", "r3", "r4", "r5"]
+
+        for index, (addr, arguments) in enumerate(self._chain):
+            if not arguments:
+                outrop.append(addr)
+
+            else:
+                if not isinstance(arguments, tuple):
+                    arguments = (arguments,)
+                arglen = len(arguments)
+
+                for i in range(arglen):
+                    gadget = self.search("r13", [regs[i]])[0]
+                    if not gadget:
+                        log.error("gadget to reg %s not found!" % regs[i])
+
+                    result = self.__verify_path([gadget], cond=[(regs[i], arguments[i]), ("pc", addr)])
+                    result = result[0]
+
+                    # TODO: how about arrange gadgets number >2
+                    path, sp, stack_result = result
+                    print path, sp, stack_result
+                    outrop.append(path[0].address)
+
+                    for pos, value in stack_result:
+                        if value == 0:
+                            value = "$"*4
+                        outrop.append(value)
+
+        return output
+
 
     _build_arm = __build_arm
 
@@ -693,12 +768,10 @@ class ROP():
         New feature: 1. Without ROPgadget
                      2. Extract all gadgets, including ret, jmp, call, syscall, sysenter.
         """
-        #self._parser = X86Parser(architecture_mode=self.bin.binary.architecture_mode)
 
-
-        gadgets = []
-        elf = self.elf
-        ROPgadget = [
+        out = []
+        #elf = self.elf
+        gadget_RE = [
                         ["\xc3", 1, 1],               # ret
                         #["\xc2[\x00-\xff]{2}", 3, 1],  # ret <imm>
                         #["\xff[\x20\x21\x22\x23\x26\x27]{1}", 2, 1], # jmp  [reg]
@@ -709,19 +782,64 @@ class ROP():
                         #["\x0f\x34", 2, 1], # sysenter
                         #["\x0f\x05", 2, 1], # syscall
                         ]
-        for seg in elf.executable_segments:
-            gadgets += self.__find_all_gadgets(seg, ROPgadget)
+        for elf in self.elfs:
+            gadgets = []
+            for seg in elf.executable_segments:
+                gadgets += self.__find_all_gadgets(seg, gadget_RE)
        
-        gadgets = self.__passCleanX86(gadgets)
-        gadgets = self.__deduplicate(gadgets)
+            gadgets = self.__passCleanX86(gadgets)
+            gadgets = self.__deduplicate(gadgets)
 
-        #build for cache
-        data = {}
-        for gad in gadgets:
-            data[gad["address"]] = gad["bytes"]
-        self.__cache_save(self.elf, data)
+            #build for cache
+            data = {}
+            for gad in gadgets:
+                data[gad["address"]] = gad["bytes"]
+            self.__cache_save(elf, data)
 
-        return gadgets
+            out += gadgets
+
+        return out
+
+    def __load_arm_gadgets(self):
+
+        out = []
+        ARM = [
+                    ["[\x00-\xff]{1}\x80\xbd\xe8", 4, 4],       # pop {,pc}
+                    #["[\x10-\x19\x1e]{1}\xff\x2f\xe1", 4, 4],  # bx   reg
+                    #["[\x30-\x39\x3e]{1}\xff\x2f\xe1", 4, 4],  # blx  reg
+                    #["\x00-\xff]{3}\xef", 4, 4] # svc
+                ]
+        ARMThumb = [
+                    ["[\x00-\xff]{1}\xbd", 2, 2],                                     # pop {,pc}
+                    #["[\x00\x08\x10\x18\x20\x28\x30\x38\x40\x48\x70]{1}\x47", 2, 2], # bx   reg
+                    #["[\x80\x88\x90\x98\xa0\xa8\xb0\xb8\xc0\xc8\xf0]{1}\x47", 2, 2], # blx  reg
+                    #["\x00-\xff]{1}\xef", 2, 2], # svc
+                ]
+
+        gt_together = {
+                capstone.CS_MODE_ARM: ARM,
+                #capstone.CS_MODE_THUMB: ARMThumb
+                }
+
+        for m, gadget_RE in gt_together.items():
+
+            self.mode = m
+            for elf in self.elfs:
+                gadgets = []
+                for seg in elf.executable_segments:
+                    gadgets += self.__find_all_gadgets(seg, gadget_RE)
+
+                gadgets = self.__deduplicate(gadgets)
+
+                #build for cache
+                data = {}
+                for gad in gadgets:
+                    data[gad["address"]] = gad["bytes"]
+                self.__cache_save(elf, data)
+
+                out += gadgets
+
+        return out
 
     def __find_all_gadgets(self, section, gadgets):
         '''Find gadgets like ROPgadget do.
@@ -735,7 +853,7 @@ class ROP():
         if cache:
             for k, v in cache.items():
                 md = capstone.Cs(self.arch, self.mode)
-                md.detail = True
+                #md.detail = True
                 decodes = md.disasm(v, k)
                 ldecodes = list(decodes)
                 gadget = ""
@@ -756,7 +874,7 @@ class ROP():
             for ref in allRef:
                 for i in range(self.depth):
                     md = capstone.Cs(self.arch, self.mode)
-                    md.detail = True
+                    #md.detail = True
                     startAddress = section.header.p_vaddr + ref - (i*gad[C_ALIGN])
                     decodes = md.disasm(section.data()[ref - (i*gad[C_ALIGN]):ref+gad[C_SIZE]], 
                                         startAddress)
@@ -842,12 +960,15 @@ class ROP():
                 if not asm_instr:
                     continue
 
+                # For ARM, Do not translate the asm instruction. For kindly reading.
+                asm_instr_old = deepcopy(asm_instr)
+
                 self._ir_trans.reset()
                 try:
                     ins_ir = self._ir_trans.translate(asm_instr)
                 except:
                     continue
-                one.append(DualInstruction(asm_instr.address, asm_instr, ins_ir))
+                one.append(DualInstruction(asm_instr.address, asm_instr_old, ins_ir))
 
             new += [RawGadget(one)]
 
@@ -859,10 +980,11 @@ class ROP():
         size = gad.size
         mnemonic = gad.mnemonic.decode('ascii')
         op_str = gad.op_str.decode('ascii')
-
+        
         asm = str(mnemonic + " " + op_str).strip()
-        if asm in ["repne", "rep", "lock", "data16"]:
-            asm, size = "", 0
+        if self.arch == capstone.CS_ARCH_X86:
+            if asm in ["repne", "rep", "lock", "data16"]:
+                asm, size = "", 0
 
         instr = self._parser.parse(asm) if asm else None
 
