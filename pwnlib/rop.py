@@ -874,7 +874,11 @@ class ROP():
                 for i in range(self.depth):
                     md = capstone.Cs(self.arch, self.mode)
                     #md.detail = True
-                    startAddress = elf.address + section.header.p_vaddr + ref - (i*gad[C_ALIGN])
+                    if elf.elftype == 'DYN':
+                        startAddress = elf.address + section.header.p_vaddr + ref - (i*gad[C_ALIGN])
+                    else:
+                        startAddress = section.header.p_vaddr + ref - (i*gad[C_ALIGN])
+
                     decodes = md.disasm(section.data()[ref - (i*gad[C_ALIGN]):ref+gad[C_SIZE]], 
                                         startAddress)
                     ldecodes = list(decodes)
