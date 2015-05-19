@@ -684,6 +684,91 @@ class ROP():
                     except KeyError:
                         self._gadget_graph[instr] = set()
 
+    def set_registers(self, values):
+        """
+        Provides a sequence of ROP gadgets which will set the desired register
+        values.
+
+        Arguments:
+
+            values(dict):
+                Mapping of ``{register name: value}``.  The contents of
+                ``value`` can be any object, not just an integer.
+
+        Return Value:
+
+            Returns a ``collections.OrderedDict`` object which is in the
+            correct order of operations.
+
+            The keys are the register names, and the values are the sequence
+            of stack values necessary to set the register.
+
+        Example:
+
+            Assume we have the following gadgets.
+
+            1000: pop eax; ret
+            2000: mov ebx, eax; ret
+            3000: pop ecx; ret
+            4000: mov edx, ebx; ret
+
+            For simple cases, the order doesn't matter.
+            (Note: The display for OrderedDict is ugly, sorry!)
+
+            >>> set_registers({'eax': 1})
+            OrderedDict([('eax', [1000, 1])])
+            >>> set_registers({'eax': 1, 'ecx': 0})
+            OrderedDict([('eax', [1000, 1]), ('ecx', [3000, 0])])
+            >>> set_registers({'ebx': None})
+            OrderedDict([('ebx', [1000, None, 2000])])
+
+            For complex cases, there is only one possible ordering:
+
+            >>> set_registers({'eax': 1, 'ebx': None})
+            OrderedDict([('ebx', [1000, None, 2000]), ('eax', [1000, 1])])
+
+            Sometimes, it may not be possible/
+
+            >>> set_registers({'esi': 0})
+            <exception>
+        """
+        pass
+
+    def solve_register_dependencies(registers, values):
+        """
+        Provides register move ordering.
+
+        Arguments:
+            registers: List of possible registers (e.g. ['eax','ebx',...]
+            values: Dictionary which maps registers to their desired values.
+
+            In some architectures, dependency cycles can be solved with an
+            'exchange' instruction (e.g. ``xchg eax, esp``).
+
+            To handle this circumstance, a ``tuple`` should be returned
+            which contains the two registers.
+
+        Returns:
+            Order in which registers should be set in order to avoid conflicts.
+
+        Example:
+
+            In this example, 'ebx' must be set before 'eax', since 'ebx'
+            requires the current value in 'eax'.
+
+            >>> want = {'eax': 11, 'ebx': 'eax', 'ecx': 'esi', 'edx': 'edx'}
+            >>> all  = ['eax', 'ebx', 'ecx', 'edx', 'esi']
+            >>> solve_register_dependencies(all, want)
+            ['ebx', 'eax', 'esi']
+
+            This example demonstrates a dependency cycle.
+
+            >>> want = {'eax': 'ebx', 'ebx': 'eax'}
+            >>> solve_register_dependencies(all, want)
+            [('eax','ebx')]
+        """
+        pass
+
     def __find_x86_paths(self):
         '''Search paths for ELF32, now only support single instruction arrangement.
         TODO: two more gadgets arrangement support.
