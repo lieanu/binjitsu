@@ -9,6 +9,7 @@ import struct
 import capstone
 import hashlib
 import tempfile
+import collections
 
 from .elf     import ELF
 from .util    import packing
@@ -45,37 +46,46 @@ class VerifyROP(GadgetVerifier):
         self.arch = binary_arch
         super(VerifyROP, self).__init__(code_analyzer, architecture_info)
 
-    #first resolvable, second the path to resolve
-    def _verify_path(self, paths, cond=[]):
-
+    def _verify_paths(self, paths):
         result = []
         for path in paths:
-            self.analyzer.reset(full=True)
-            for gadget in path:
-                for reil_instr in gadget.get_ir_instrs():
-                    if reil_instr.mnemonic == ReilMnemonic.RET:
-                        break
-                    self.analyzer.add_instruction(reil_instr)
-
-            dst = set()
-            for i in path[-1].destination:
-                if isinstance(i, ReilRegisterOperand):
-                    dst.add(i.name)
-
-            sat, rsp, stack_result = False, 0, []
-            if self.arch == arch.ARCH_X86:
-                if self._arch_info.architecture_mode == arch.ARCH_X86_MODE_64:
-                    sat, rsp, stack_result = self._satisfy_x64(cond)
-                elif self._arch_info.architecture_mode == arch.ARCH_X86_MODE_32:
-                    sat, rsp, stack_result = self._satisfy_x86(cond)
-            elif self.arch == arch.ARCH_ARM:
-                if self._arch_info.architecture_mode == arch.ARCH_ARM_MODE_32:
-                    sat, rsp, stack_result = self._satisfy_arm(cond)
-
-            if sat:
-                result.append((path, rsp, stack_result))
+            res = self._verify_path(path, cond=[])
+            if res:
+                result.append(res)
 
         return result
+
+    def _verify_path(self, path, cond=[]):
+        """Solve the stack of a gadget path.
+        """
+        
+        self.analyzer.reset(full=True)
+        for gadget in path:
+            for reil_instr in gadget.get_ir_instrs():
+                if reil_instr.mnemonic == ReilMnemonic.RET:
+                    break
+                self.analyzer.add_instruction(reil_instr)
+
+        dst = set()
+        for i in path[-1].destination:
+            if isinstance(i, ReilRegisterOperand):
+                dst.add(i.name)
+
+        sat, rsp, stack_result = False, 0, []
+        if self.arch == arch.ARCH_X86:
+            if self._arch_info.architecture_mode == arch.ARCH_X86_MODE_64:
+                sat, rsp, stack_result = self._satisfy_x64(cond)
+            elif self._arch_info.architecture_mode == arch.ARCH_X86_MODE_32:
+                sat, rsp, stack_result = self._satisfy_x86(cond)
+        elif self.arch == arch.ARCH_ARM:
+            if self._arch_info.architecture_mode == arch.ARCH_ARM_MODE_32:
+                sat, rsp, stack_result = self._satisfy_arm(cond)
+
+        if sat:
+            return (path, rsp, stack_result)
+        else:
+            return None
+
 
     def _satisfy_arm(self, cond):
 
@@ -104,7 +114,7 @@ class VerifyROP(GadgetVerifier):
         if self.analyzer.check() == 'sat':
             sp_val = self.analyzer.get_expr_value(sp_post)
 
-            for i in xrange((sp_val/4)):
+            for i in xrange((sp_val/4 - 1)):
                 t = self.analyzer.get_expr_value(stack[i])
                 stack_result.append((i, t))
 
@@ -249,6 +259,16 @@ class ROP():
         self._chain = []
         self._gadget_graph = {}
         self.__build_graph()
+       
+        self._global_delete_gadget = {}
+        gadget_graph = deepcopy(self._gadget_graph)
+
+        self._top_sorted = self.__build_top_sort(gadget_graph)
+        # Delete  circles in graph
+        for d, dlist in self._global_delete_gadget.items():
+            for i in dlist:
+                # TODO: Fix this bug
+                self._gadget_graph[d].remove(i)
 
     def __filter_for_big_binary_or_elf32(self, gadgets):
         '''Filter gadgets for big binary.
@@ -258,14 +278,22 @@ class ROP():
         add   = re.compile(r'^add .sp, (\S+)$')
         ret   = re.compile(r'^ret$')
         leave = re.compile(r'^leave$')
+        mov   = re.compile(r'^mov (.{3}), (.{3})')
+        xchg  = re.compile(r'^xchg (.{3}), (.{3})')
 
-        valid = lambda insn: any(map(lambda pattern: pattern.match(insn), [pop,add,ret,leave]))
+        valid = lambda insn: any(map(lambda pattern: pattern.match(insn), [pop,add,ret,leave,mov,xchg]))
 
         insns = [g.strip() for g in gadgets["gadget"].split(";")]
         if all(map(valid, insns)):
             new.append(gadgets)
 
         return new
+
+    def for_debug_graph(self):
+        for g, list in self._gadget_graph.items():
+            print str(g), "\t", "; ".join([str(dinstr.asm_instr) for dinstr in g.instrs])
+            for x in list:
+                print "\t", str(x), "\t", "; ".join([str(dinstr.asm_instr) for dinstr in x.instrs])
 
     def for_debug_v(self):
         '''For debug verified gadgets.
@@ -434,6 +462,7 @@ class ROP():
                     out.append((addr, v, False))
                     addr += len(v)
                 elif isinstance(v, tuple):
+                    print "when v in tuple: ", v
                     if v[0] in addrs:
                         out.append((addr, addrs[v[0]], True))
                         addr += self.align
@@ -494,7 +523,7 @@ class ROP():
         outrop = []
         output = [outrop]
 
-        gg = self.__verify_path(self.__find_x86_paths())
+        gg = self.verifier._verify_paths(self.__find_x86_paths())
         gg = sorted(gg, key=itemgetter(1))
 
         for index, (addr, arguments)  in enumerate(self._chain):
@@ -521,6 +550,7 @@ class ROP():
 
         return output
 
+
     _build_i386 = __build_x86
 
     def __build_x64(self):
@@ -540,42 +570,18 @@ class ROP():
             else:
                 if not isinstance(arguments, tuple):
                     arguments = (arguments,)
-                arglen = len(arguments)
 
-                for i in range(arglen):
-                    gadget = self.search("rsp", [regs[i]])[0]
-                    if not gadget:
-                        log.error("gadget to reg %s not found!" % regs[i])
-
-                    result = self.__verify_path([gadget], cond=[(regs[i], arguments[i])])
-                    result = result[0]
-
-                    # FIX Done: how about arrange gadgets number > 2
-                    rsp = 0
-                    know = {}
-                    for gad in gadget:
-                        if rsp != 0:
-                            know[rsp/8] = gad.address
-                        temp_result = self.__verify_path([[gad]])[0]
-                        rsp += temp_result[1]
-
-                    path, rsp, stack_result = result
-                    outrop.append(path[0].address)
-                    
-                    for pos, value in stack_result:
-                        if pos in know.keys():
-                            outrop.append(know[pos])
-                            continue
-
-                        if value == 0:
-                            value = "$"*8
-                        outrop.append(value)
+                input_values = dict(zip(regs, arguments))
+                stack = self.set_registers(input_values)
+                stack_concate = reduce(lambda x, y: x + y, stack.values())
+                outrop += stack_concate
 
                 outrop.append(addr)
 
         return output 
 
     _build_amd64 = __build_x64
+
 
     def __build_arm(self):
         outrop = []
@@ -590,29 +596,18 @@ class ROP():
             else:
                 if not isinstance(arguments, tuple):
                     arguments = (arguments,)
-                arglen = len(arguments)
 
-                for i in range(arglen):
-                    gadget = self.search("r13", [regs[i]])[0]
-                    if not gadget:
-                        log.error("gadget to reg %s not found!" % regs[i])
+                input_values = dict(zip(regs, arguments))
+                stack = self.set_registers(input_values)
+                stack_concate = reduce(lambda x, y: x + y, stack.values())
+                outrop += stack_concate
 
-                    result = self.__verify_path([gadget], cond=[(regs[i], arguments[i]), ("pc", addr)])
-                    result = result[0]
-
-                    # TODO: how about arrange gadgets number >2
-                    path, sp, stack_result = result
-                    outrop.append(path[0].address)
-
-                    for pos, value in stack_result:
-                        if value == 0:
-                            value = "$"*4
-                        outrop.append(value)
+                outrop.append(addr)
 
         return output
 
-
     _build_arm = __build_arm
+
 
     def resolve(self, resolvable):
         """Resolves a symbol to an address
@@ -657,32 +652,118 @@ class ROP():
         '''Build gadgets graph, gadget as vertex, reg as edge.
         '''
         for instr in self.verified:
+            #inital gadgets graph
+            self._gadget_graph[instr] = set()
 
-            dst = []
             regmaps = self.bin.arch_info.alias_mapper
+            regall = self.bin.arch_info.registers_size
             op_size = self.bin.arch_info.operand_size
-            for s in instr.destination:
-                if s.size != op_size:
-                    dst.append(regmaps[str(s)][0])
-                else:
-                    dst.append(str(s))
+
+            g_str1, _ = str(instr).split(" > ")
+            lhand1, _ = g_str1.split(" <- ")
+            dst_reg = lhand1
+            
+            if dst_reg.startswith("mem"):
+                continue
+
+            for reg, size in regall.items():
+                if reg == dst_reg and size != op_size:
+                    dst_reg = regmaps[dst_reg][0]
+
             for instr_b in self.verified:
                 if instr == instr_b:
-                    break
+                    continue
                 
-                src = []
-                for s in instr_b.sources:
-                    if isinstance(s, ReilRegisterOperand):
-                        if s.size != op_size:
-                            src.append(regmaps[str(s)][0])
-                        else:
-                            src.append(str(s))
-                instr_xor = list(set(dst) & set(src))
-                if len(instr_xor) != 0:
-                    try:
-                        self._gadget_graph[instr].add(instr_b)
-                    except KeyError:
-                        self._gadget_graph[instr] = set()
+                g_str2, _ = str(instr_b).split(" > ")
+                _ , rhand2 = g_str2.split(" <- ")
+                src_reg = rhand2
+                
+                if src_reg.startswith("0x"):
+                    continue
+                if src_reg.startswith("mem"):
+                    continue
+
+                # TODO: regs for arithmetic operations
+                if len(src_reg) > 3:
+                    continue
+                
+                for reg, size in regall.items():
+                    if reg == src_reg and size != op_size:
+                        src_reg = regmaps[src_reg][0]
+
+                if dst_reg == src_reg:
+                    self._gadget_graph[instr].add(instr_b)
+
+    def __build_top_sort(self, graph):
+        """
+        Topological sort a graph.
+
+        Arguments:
+            
+            graph(dict):
+                A simple example : graph = {'eax': ['ebx'], 'ebx': ['eax'], 'edx': ['eax']}
+                May be cycles in graph. we need to handle it.
+
+        Return Value:
+            top_sorted(list):
+                such as: ["edx", "eax", "ebx"]
+        """
+        top_sorted = []
+        indegree_zero = []
+
+        #Inital indegree list will zero.
+        indegree = {}
+        for k, v in graph.items():
+            indegree[k] = 0
+            for l in v:
+                indegree[l] = 0
+
+        #Caculate indegree, for gadget graph.
+        for g, glist in graph.items():
+            for gadget in glist:
+                indegree[gadget] += 1
+        
+        #inital indegree_zero list.
+        for g, indeg in indegree.items():
+            if indeg == 0:
+                indegree_zero.append(g)
+
+        # TOP sort
+        while len(indegree_zero) > 0:
+            n = indegree_zero.pop()
+            top_sorted.append(n)
+
+            if n not in graph.keys():
+                continue
+
+            for m in graph[n]:
+                indegree[m] -= 1
+                if indegree[m] == 0:
+                    indegree_zero.append(m)
+            del(graph[n])
+       
+        # Recursive top sort.
+        if len(graph) != 0:
+            for g, indeg in indegree.items():
+                if indeg == 1:
+                    for k, glist in graph.items():
+                        for h in glist:
+                            if h == g:
+                                graph[k].remove(h)
+                                if k not in self._global_delete_gadget.keys():
+                                    self._global_delete_gadget[k] = set()
+                                self._global_delete_gadget[k].add(h)
+
+                                if top_sorted == None:
+                                    top_sorted = []
+
+                                last_result = self.__build_top_sort(graph)
+                                if last_result == None:
+                                    last_result = []
+                                return top_sorted + last_result
+        else:
+            return top_sorted
+
 
     def set_registers(self, values):
         """
@@ -717,6 +798,7 @@ class ROP():
 
             >>> set_registers({'eax': 1})
             OrderedDict([('eax', [1000, 1])])
+            OrderedDict([('eax', [1000], 8, [(0, 1)])])
             >>> set_registers({'eax': 1, 'ecx': 0})
             OrderedDict([('eax', [1000, 1]), ('ecx', [3000, 0])])
             >>> set_registers({'ebx': None})
@@ -732,9 +814,76 @@ class ROP():
             >>> set_registers({'esi': 0})
             <exception>
         """
-        pass
+        out = []
+        ropgadgets = {}
+        gadget_list = {}
 
-    def solve_register_dependencies(registers, values):
+        if isinstance(values, list):
+            values = dict(values)
+
+        regmaps = self.bin.arch_info.alias_mapper
+        for reg, value in values.items():
+
+            ropgadget = self.search(regmaps["sp"][0], [reg])[0]
+            if not ropgadget:
+                log.error("Gadget to reg %s not found!" % reg)
+
+            # Combine the same gadgets together.
+            last_gadget_address = ropgadget[-1].address
+            ropgadgets[last_gadget_address] = ropgadget
+            if last_gadget_address not in gadget_list.keys():
+                gadget_list[last_gadget_address] = []
+            gadget_list[last_gadget_address].append(reg)
+
+        for address, regs in gadget_list.items():
+            ropgadget = ropgadgets[address]
+            conditions = []
+            for reg in regs:
+                conditions += [(reg, values[reg])]
+            path, sp, stack = self.__verify_path(ropgadget, conditions)
+            out += [("_".join(regs), (ropgadget, sp, stack))]
+
+        ordered_out = sorted(out, key=lambda t: self._top_sorted[::-1].index(t[1][0][-1]))
+        ordered_out = dict(ordered_out)
+
+        ordered_out = self.flat_as_stack(ordered_out)
+
+        return ordered_out
+    
+    def flat_as_stack(self, ordered_dict):
+        
+        out = []
+        junk = "$" * self.align
+
+        for reg, result in ordered_dict.items():
+            outrop = []
+            ropgadget, _, _ = result
+            sp = 0
+            know = {}
+            for gad in ropgadget:
+                if sp != 0:
+                    know[sp / self.align] = gad.address
+                temp_result = self.__verify_path([gad])
+                sp += temp_result[1]
+
+            ropgadget, _, stack_result = result
+            outrop.append(ropgadget[0].address)
+
+            for pos, value in stack_result:
+                if pos in know.keys():
+                    outrop.append(know[pos])
+                    continue
+                if value == 0:
+                    value = junk
+
+                outrop.append(value)
+            out += [(reg, outrop)]
+
+        out = collections.OrderedDict(out)
+        return out
+
+
+    def solve_register_dependencies(self, registers, values):
         """
         Provides register move ordering.
 
@@ -767,7 +916,39 @@ class ROP():
             >>> solve_register_dependencies(all, want)
             [('eax','ebx')]
         """
-        pass
+
+        # Build graph
+        # Consider multi to multi dependency relationship
+        reg_graph = {}
+        for k, v in values.items():
+            if not isinstance(v, list):
+                v = [v]
+            reg_graph[k] = v
+
+        # Top sort
+        all_tuple = []
+        reg_graph2 = deepcopy(reg_graph)
+        self._global_delete_gadget = {}
+        top_sorted = self.__build_top_sort(reg_graph2)
+        
+        # look for cycles
+        for reg, regs_list in self._global_delete_gadget.items():
+            for one in regs_list:
+                if reg in reg_graph[one]:
+                    all_tuple += [(one, reg)]
+        
+        all_cycle_regs = dict(all_tuple)
+
+        registers = list(set(registers) & set(top_sorted) - set(all_cycle_regs.values()))
+        ordered_out = sorted(registers, key=lambda t: top_sorted.index(t))
+
+        for i in range(len(ordered_out)):
+            one = ordered_out[i]
+            if one in all_cycle_regs.keys():
+                ordered_out[i] = (one, all_cycle_regs[one])
+
+        return ordered_out
+
 
     def __find_x86_paths(self):
         '''Search paths for ELF32, now only support single instruction arrangement.
@@ -842,10 +1023,12 @@ class ROP():
                     if new_path:
                         yield new_path
 
-    def __verify_path(self, paths, cond=[]):
+
+
+    def __verify_path(self, path, cond=[]):
         '''Verify paths, get the rsp(esp) jump value, and the value on stack.
         '''
-        return self.verifier._verify_path(paths, cond)
+        return self.verifier._verify_path(path, cond)
 
     def __load_x86_gadgets(self):
         """Load all ROP gadgets for the selected ELF files
