@@ -15,8 +15,10 @@ from .elf     import ELF
 from .util    import packing
 from .log     import getLogger
 
-from operator import itemgetter
-from copy     import deepcopy
+from multiprocessing    import Pool
+from itertools          import repeat
+from operator           import itemgetter
+from copy               import deepcopy
 
 from barf.barf import BARF
 from barf.arch import arch
@@ -205,6 +207,7 @@ class VerifyROP(GadgetVerifier):
 class ROP():
 
     def __init__(self, elfs, base = None, byte_depth=20, instrs_depth=7):
+        
 
         if isinstance(elfs, ELF):
             filename = elfs.file.name
@@ -252,9 +255,10 @@ class ROP():
         
         #classified the gadgets
         self.classified = self.do_classify()
-
+        
         #verify the gadgets
         self.verified = self.do_verify()
+
 
         self._chain = []
         self._gadget_graph = {}
@@ -288,6 +292,7 @@ class ROP():
             new.append(gadgets)
 
         return new
+
 
     def for_debug_graph(self):
         for g, list in self._gadget_graph.items():
@@ -462,7 +467,6 @@ class ROP():
                     out.append((addr, v, False))
                     addr += len(v)
                 elif isinstance(v, tuple):
-                    print "when v in tuple: ", v
                     if v[0] in addrs:
                         out.append((addr, addrs[v[0]], True))
                         addr += self.align
@@ -742,27 +746,27 @@ class ROP():
                     indegree_zero.append(m)
             del(graph[n])
        
-        # Recursive top sort.
-        if len(graph) != 0:
-            for g, indeg in indegree.items():
-                if indeg == 1:
-                    for k, glist in graph.items():
-                        for h in glist:
-                            if h == g:
-                                graph[k].remove(h)
-                                if k not in self._global_delete_gadget.keys():
-                                    self._global_delete_gadget[k] = set()
-                                self._global_delete_gadget[k].add(h)
-
-                                if top_sorted == None:
-                                    top_sorted = []
-
-                                last_result = self.__build_top_sort(graph)
-                                if last_result == None:
-                                    last_result = []
-                                return top_sorted + last_result
-        else:
+        if len(graph) == 0:
             return top_sorted
+
+        # Recursive top sort.
+        for g, indeg in indegree.items():
+            if indeg == 1:
+                for k, glist in graph.items():
+                    for h in glist:
+                        if h == g:
+                            #delete the edge of a cirle.
+                            graph[k].remove(h)
+
+                            #record the deleted edge of cirles.
+                            if k not in self._global_delete_gadget.keys():
+                                self._global_delete_gadget[k] = set()
+                            self._global_delete_gadget[k].add(h)
+                            
+                            # Recurisve top sorting.
+                            last_result = self.__build_top_sort(graph)
+
+                            return top_sorted + last_result
 
 
     def set_registers(self, values):
@@ -843,8 +847,8 @@ class ROP():
             path, sp, stack = self.__verify_path(ropgadget, conditions)
             out += [("_".join(regs), (ropgadget, sp, stack))]
 
-        ordered_out = sorted(out, key=lambda t: self._top_sorted[::-1].index(t[1][0][-1]))
-        ordered_out = dict(ordered_out)
+        ordered_out = collections.OrderedDict(sorted(out, 
+                      key=lambda t: self._top_sorted[::-1].index(t[1][0][-1])))
 
         ordered_out = self.flat_as_stack(ordered_out)
 
@@ -1120,7 +1124,6 @@ class ROP():
         if cache:
             for k, v in cache.items():
                 md = capstone.Cs(self.arch, self.mode)
-                #md.detail = True
                 decodes = md.disasm(v, k)
                 ldecodes = list(decodes)
                 gadget = ""
