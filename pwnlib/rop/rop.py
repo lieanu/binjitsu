@@ -410,7 +410,7 @@ class ROP(object):
 
         #Find all gadgets
         gf = GadgetFinder(elfs, "all")
-        self.gadgets = gf.load_gadgets() 
+        self.gadgets = gf.load_gadgets()
 
         self.Verify = gf.solver
 
@@ -459,8 +459,16 @@ class ROP(object):
             self.ret_to_stack_gadget = None
 
             self.initialized = True
-    
-    
+
+    def setRegisters_print(rop, context):
+        for r, gadgets in rop.setRegisters(context).items():
+            print '<setting %s>' % r
+            for g in gadgets:
+                if isinstance(g, pwnlib.rop.gadgets.Gadget):
+                    print hex(g.address), '; '.join(g.insns)
+                elif isinstance(g, int):  print hex(g)
+                else: print g
+
     def setRegisters(self, values):
         """
         Provides a sequence of ROP gadgets which will set the desired register
@@ -510,7 +518,7 @@ class ROP(object):
             >>> rop.setRegisters({'esi': 0})
             <exception>
         """
-        
+
         # init GadgetSolver and GadgetClassify
         self.__init_classify_and_solver()
 
@@ -529,7 +537,7 @@ class ROP(object):
         def md5_path(path):
             out = []
             for gadget in path:
-                out.append("; ".join(gadget.insns)) 
+                out.append("; ".join(gadget.insns))
 
             return hashlib.md5("|".join(out)).hexdigest()
 
@@ -574,7 +582,7 @@ class ROP(object):
                     number = len(regs)
                 temp[path_hash] = number
 
-            return collections.OrderedDict(sorted(gadget_list.items(), key=lambda t:(-temp[t[0]], 
+            return collections.OrderedDict(sorted(gadget_list.items(), key=lambda t:(-temp[t[0]],
                           len("; ".join([ "; ".join(i.insns) for i in ropgadgets[t[0]]])))))
 
         gadget_list = re_order(gadget_list)
@@ -600,7 +608,7 @@ class ROP(object):
             if modified_regs:
                 path = ropgadgets[path_hash]
 
-                # If two or more regs source from same origin, 
+                # If two or more regs source from same origin,
                 # Nop and push back this gadget path
                 if self.check_same_origin(path, modified_regs):
                     gadget_list[path_hash] = regs
@@ -612,7 +620,7 @@ class ROP(object):
 
                 path, return_to_stack_gadget, conditions, additional = result
                 additional_conditions.update(additional)
-                
+
                 # If conditions'key in Gadget's registers.
                 # Handle this conflict.
                 for conflict_key in conditions.keys():
@@ -700,7 +708,7 @@ class ROP(object):
 
         return [gadgets_dict[i] for i in match_list]
 
-    
+
     def flat_a_gadget_without_conditions(self, gadget):
         value_to_flat = {"tail":([gadget],
                                  gadget.move,
@@ -781,7 +789,7 @@ class ROP(object):
                 front_path += [gadget]
 
         return (front_path, return_to_stack_gadget, condition, additional)
-    
+
     def get_return_to_stack_gadget(self, mnemonic="", move=0):
         if mnemonic == "call":
             RET_GAD = re.compile(r'(pop (.{3}); )+ret$')
@@ -790,7 +798,7 @@ class ROP(object):
                         "amd64" : re.compile(r'(pop (.{3}); )*ret$'),
                         "arm"   : re.compile(r'^pop \{.*pc\}')}[self.arch]
 
-        # Find all matched gadgets, choose the shortest one. 
+        # Find all matched gadgets, choose the shortest one.
         match_list = [gad for gad in self.gadgets.values() if RET_GAD.match("; ".join(gad.insns)) and gad.move >= move]
         sorted_match_list = sorted(match_list, key=lambda t:len("; ".join(t.insns)))
         if sorted_match_list:
@@ -821,7 +829,7 @@ class ROP(object):
             compensate = 0
             path_len = len(path)
             for i in range(path_len):
-                
+
                 gadget = path[i]
                 if i == path_len - 1:
                     break
@@ -994,9 +1002,9 @@ class ROP(object):
                 tail = None
                 operand = ""
                 if remaining and self.arch == "arm":
-                    func_tail = self.add_blx_pop_for_arm() 
+                    func_tail = self.add_blx_pop_for_arm()
                     for gadget in func_tail:
-                        operand = gadget.insns[0].split()[1] 
+                        operand = gadget.insns[0].split()[1]
                         registers.update({operand : slot.target})
                         try:
                             tail = self.flat_a_gadget_without_conditions(gadget)
@@ -1027,7 +1035,7 @@ class ROP(object):
 
                 if address != stack.next:
                     stack.describe(slot.name)
-                
+
                 head_or_tail_added = False
                 if self.arch == "arm" and remaining > 0  and tail:
                     stack.extend(tail)
@@ -1162,7 +1170,7 @@ class ROP(object):
         else:
             addr = resolvable
             resolvable = ''
-        
+
         if addr:
             self.raw(Call(resolvable, addr, arguments, abi))
 
@@ -1385,14 +1393,14 @@ class ROP(object):
         '''Build gadgets graph, gadget as vertex, reg as edge.
 
         Arguments:
-            
+
             gadgets(dict):
                 { address: Gadget object }
 
-        Returns: dict, Graph in adjacency list format. 
+        Returns: dict, Graph in adjacency list format.
 
         Example:
-            
+
             Assume we have the following gadgets.
 
             Gadget01 ==> 1000: pop eax; ret
@@ -1401,7 +1409,7 @@ class ROP(object):
             Gadget04 ==> 4000: mov edx, ebx; ret
 
             The gadget graph will looks like this:
-            {Gadget01: [Gadget02], 
+            {Gadget01: [Gadget02],
              Gadget02: [Gadget04],
              Gadget03: [],
              Gadget04: []}
@@ -1449,7 +1457,7 @@ class ROP(object):
         Topological sort a graph.
 
         Arguments:
-            
+
             graph(dict):
                 A simple example : graph = {'eax': ['ebx'], 'ebx': ['eax'], 'edx': ['eax']}
                 May be cycles in graph. we need to handle it.
@@ -1477,7 +1485,7 @@ class ROP(object):
         for g, indeg in indegree.items():
             if indeg == 0:
                 indegree_zero.append(g)
-        
+
         # TOP sort
         while len(indegree_zero) > 0:
             n = indegree_zero.pop()
@@ -1491,10 +1499,10 @@ class ROP(object):
                 if indegree[m] == 0:
                     indegree_zero.append(m)
             del(graph[n])
-        
+
         if len(graph) == 0:
             return top_sorted
-        
+
         # Recursive top sort.
         for g, indeg in indegree.items():
             if indeg >= 1:
@@ -1506,7 +1514,7 @@ class ROP(object):
                             if k not in self._global_delete_gadget.keys():
                                 self._global_delete_gadget[k] = set()
                             self._global_delete_gadget[k].add(h)
-                            
+
         # Recurisve top sorting.
         last_result = self.__build_top_sort(graph)
         if not last_result:
@@ -1582,7 +1590,7 @@ class ROP(object):
                 reg64 = "r" + reg[-2:]
                 if reg != reg64:
                     cond[reg64] = random.randint(2**16, 2**32)
-        
+
         # Solve this gadgets arrangement, if stack's value not changed, ignore it.
         path_filted = []
         for path in paths:
@@ -1590,7 +1598,7 @@ class ROP(object):
             if out:
                 path_filted.append(path)
 
-        paths = sorted(path_filted, 
+        paths = sorted(path_filted,
                 key=lambda path: len(" + ".join(["; ".join(gad.insns) for gad in path])))
 
         if not paths:
