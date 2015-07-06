@@ -460,11 +460,11 @@ class ROP(object):
 
             self.initialized = True
 
-    def setRegisters_print(rop, context):
-        for r, gadgets in rop.setRegisters(context).items():
+    def setRegisters_print(self, context):
+        for r, gadgets in self.setRegisters(context).items():
             print '<setting %s>' % r
             for g in gadgets:
-                if isinstance(g, pwnlib.rop.gadgets.Gadget):
+                if isinstance(g, Gadget):
                     print hex(g.address), '; '.join(g.insns)
                 elif isinstance(g, int):  print hex(g)
                 else: print g
