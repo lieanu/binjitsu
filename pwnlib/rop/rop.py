@@ -460,13 +460,18 @@ class ROP(object):
 
             self.initialized = True
 
-    def setRegisters_print(self, context):
-        for r, gadgets in self.setRegisters(context).items():
+    def setRegisters_print(self, condition):
+        for r, gadgets in self.setRegisters(condition).items():
             print '<setting %s>' % r
+            offset = 0
             for g in gadgets:
                 if isinstance(g, Gadget):
                     print hex(g.address), '; '.join(g.insns)
                 elif isinstance(g, int):  print hex(g)
+                elif isinstance(g, Padding):
+                    print self.generatePadding(offset,context.bytes)
+                    offset += context.bytes
+
                 else: print g
 
     def setRegisters(self, values):
@@ -490,33 +495,161 @@ class ROP(object):
 
         Example:
 
-            Assume we have the following gadgets.
+            Example for i386:
+            >>> context.clear(arch='i386')
+            >>> assembly  = 'pop eax; ret;'
+            >>> assembly += 'mov ebx, eax; ret;'
+            >>> assembly += 'pop ecx; call eax'
+            >>> rop = ROP(ELF.from_assembly(assembly))
+            >>> con = {'eax':1, 'ebx':2, 'ecx':3}
+            >>> rop.setRegisters_print(con)
+            <setting ecx>
+            0x8049074 pop eax; ret
+            0x8049074
+            0x8049079 pop ecx; call eax
+            0x3
+            <setting ebx>
+            0x8049074 pop eax; ret
+            0x2
+            0x8049076 mov ebx, eax; ret
+            <setting eax>
+            0x8049074 pop eax; ret
+            0x1
+            
+            Example for amd64:
+            >>> context.clear(arch='amd64')
+            >>> assembly  = 'pop rax; ret;'
+            >>> assembly += 'mov rbx, rax; ret;'
+            >>> assembly += 'pop rcx; jmp rax'
+            >>> rop = ROP(ELF.from_assembly(assembly))
 
-            1000: pop eax; ret
-            2000: mov ebx, eax; ret
-            3000: pop ecx; ret
-            4000: mov edx, ebx; ret
+            >>> con = {'rax': 1, 'rbx': 2, 'rcx': 3}
+            >>> rop.setRegisters_print(con)
+            <setting rcx>
+            0x6000b0 pop rax; ret
+            0x6000b1
+            0x6000b6 pop rcx; jmp rax
+            0x3
+            <setting rbx>
+            0x6000b0 pop rax; ret
+            0x2
+            0x6000b2 mov rbx, rax; ret
+            <setting rax>
+            0x6000b0 pop rax; ret
+            0x1
 
-            For simple cases, the order doesn't matter.
-            (Note: The display for OrderedDict is ugly, sorry!)
+            Example for ARM:
+            >>> context.clear(arch='arm')
+            >>> assembly  = 'pop {r0, pc};'
+            >>> assembly += 'pop {r0, r1, pc};'
+            >>> assembly += 'pop {r0, r2, pc};'
+            >>> assembly += 'mov r3, r2; pop {pc};'
+            >>> assembly += 'mov r4, r0; blx r1'
+            >>> rop = ROP(ELF.from_assembly(assembly))
+
+            >>> rop.setRegisters_print({'r4': 1})
+            <setting r4>
+            0x9098 pop {r0, r1, pc}
+            0x1
+            0x90a4
+            0x90a8 mov r4, r0; blx r1
+            
+            Arm Example 02:
+            >>> context.clear(arch='arm')
+            >>> assembly  = 'pop {lr};'
+            >>> assembly += 'bx lr'
+            >>> rop = ROP(ELF.from_assembly(assembly))
+            >>> rop.setRegisters_print({'pc' : 1})
+            <setting pc>
+            0x9094 pop {lr}; bx lr
+            0x1
+
+            >>> context.clear(arch='arm')
+            >>> assembly = 'pop {pc}'
+            >>> rop = ROP(ELF.from_assembly(assembly))
+            >>> rop.setRegisters_print({'pc' : 0xdeadbeef})
+            <setting pc>
+            0x10000000 pop {pc}
+            0xdeadbeef
 
             >>> context.clear(arch='i386')
-            >>> binary = ELF.from_assembly('pop eax; ret; mov ebx, eax; ret; pop ecx; ret; mov edx, ebx; ret')
-            >>> rop = ROP(binary)
-            >>> rop.setRegisters({'eax': 1})
-            OrderedDict([('eax', [Gadget(0x10000000, [u'pop eax', u'ret'], {'eax': M32(M32(esp), #0), 'esp': ['esp'], 'eip': M32(M32(esp+4), #4)}, 0x8), 1])])
-            >>> rop.setRegisters({'eax': 1, 'ecx': 0})
-            OrderedDict([('eax', [Gadget(0x10000000, [u'pop eax', u'ret'], {'eax': M32(M32(esp), #0), 'esp': ['esp'], 'eip': M32(M32(esp+4), #4)}, 0x8), 1]), ('ecx', [Gadget(0x10000005, [u'pop ecx', u'ret'], {'eip': M32(M32(esp+4), #4), 'esp': ['esp'], 'ecx': M32(M32(esp), #0)}, 0x8), 0])])
+            >>> assembly  = shellcraft.read(0, 'esp', 0x1000) 
+            >>> assembly += 'pop eax; ret;'
+            >>> assembly += 'xchg edx, ecx; jmp eax;'
+            >>> assembly += 'pop ecx; ret'
+            >>> rop = ROP(ELF.from_assembly(assembly))
+            >>> con = {'edx': unpack('_EDX')}
+            >>> rop.setRegisters_print(con)
+            <setting edx>
+            0x10000013 pop ecx; ret
+            0x5844455f
+            0x1000000d pop eax; ret
+            0x1000000e
+            0x1000000f xchg edx, ecx; jmp eax
 
-            For complex cases, there is only one possible ordering:
+            >>> context.clear(arch='i386')
+            >>> assembly = 'mov eax, [esp]; pop ebx; ret'
+            >>> rop = ROP(ELF.from_assembly(assembly))
+            >>> con = {'eax': 0, 'ebx':1}
+            >>> rop.setRegisters_print(con)
+            <setting eax>
+            0x10000000 mov eax, dword ptr [esp]; pop ebx; ret
+            0x0
+            <setting ebx>
+            0x10000003 pop ebx; ret
+            0x1
 
-            >>> rop.setRegisters({'eax': 1, 'ebx': 2})
-            OrderedDict([('ebx', [Gadget(0x10000000, [u'pop eax', u'ret'], {'eax': M32(M32(esp), #0), 'esp': ['esp'], 'eip': M32(M32(esp+4), #4)}, 0x8), 2, Gadget(0x10000002, [u'mov ebx, eax', u'ret'], {'eip': M32(M32(esp), #0), 'ebx': 'eax', 'esp': ['esp']}, 0x4)]), ('eax', [Gadget(0x10000000, [u'pop eax', u'ret'], {'eax': M32(M32(esp), #0), 'esp': ['esp'], 'eip': M32(M32(esp+4), #4)}, 0x8), 1])])
+            >>> context.clear(arch='i386')
+            >>> assembly  = 'add esp, 0x10; ret;'
+            >>> assembly += 'add esp, 0xc; ret;'
+            >>> assembly += 'add esp, 0x8; ret;'
+            >>> assembly += 'pop eax; ret;'
+            >>> assembly += 'pop ebx; call eax;'
+            >>> assembly += 'mov ecx, ebx; ret;'
+            >>> assembly += 'xchg edx, ecx; jmp eax;'
+            >>> assembly += 'mov edi, [esp+8]; add esp, 4; ret'
+            >>> rop = ROP(ELF.from_assembly(assembly))
+            >>> con = {'edi': 0xdeadbeef}
+            >>> rop.setRegisters_print(con)
+            <setting edi>
+            0x10000018 mov edi, dword ptr [esp + 8]; add esp, 4; ret
+            aaaa
+            0x1000000c
+            0xdeadbeef
 
-            Sometimes, it may not be possible/
+            >>> context.clear(arch='i386')
+            >>> assembly  = 'pop eax; ret;'
+            >>> assembly += 'pop ebx; call eax;'
+            >>> assembly += 'mov ecx, ebx; ret;'
+            >>> assembly += 'xchg edx, ecx; jmp eax;'
+            >>> assembly += 'mov edi, edx; ret'
+            >>> rop = ROP(ELF.from_assembly(assembly))
 
-            >>> rop.setRegisters({'esi': 0})
-            <exception>
+            >>> con = {'eax': 1, 'ebx': 2, 'ecx': 3, 'edx': 4}
+            
+            >>> rop.setRegisters_print(con)
+            <setting edx>
+            0x10000000 pop eax; ret
+            0x10000000
+            0x10000002 pop ebx; call eax
+            0x4
+            0x10000005 mov ecx, ebx; ret
+            0x10000008 xchg edx, ecx; jmp eax
+            aaaa
+            <setting ecx>
+            0x10000000 pop eax; ret
+            0x10000000
+            0x10000002 pop ebx; call eax
+            0x3
+            0x10000005 mov ecx, ebx; ret
+            <setting ebx>
+            0x10000000 pop eax; ret
+            0x10000000
+            0x10000002 pop ebx; call eax
+            0x2
+            <setting eax>
+            0x10000000 pop eax; ret
+            0x1
         """
 
         # init GadgetSolver and GadgetClassify
@@ -670,8 +803,8 @@ class ROP(object):
         last_gadget = path[-1]
         sources = []
         for reg in regs:
-            sources.append(last_gadget.regs[reg])
-
+            sources.append(str(last_gadget.regs[reg]))
+        
         if len(set(sources)) < len(regs):
             return True
 
@@ -1249,7 +1382,23 @@ class ROP(object):
         self._chain.append(value)
 
     def migrate(self, next_base):
-        """A simple implementation for setting $sp"""
+        """A simple implementation for setting $sp.
+        
+        >>> context.clear(arch='i386')
+        >>> assembly = shellcraft.read(0, 'esp', 0x1000)
+        >>> assembly += "pop ebp; ret;"
+        >>> assembly += "leave; ret;"
+        >>> rop = ROP(ELF.from_assembly(assembly))
+        
+        Migrate stack to 0x0.
+        >>> rop.migrate(0)
+        >>> print rop.dump()
+        0x0000:       0x1000000d pop ebp; ret
+        0x0004:       0xfffffffc
+        0x0008:       0x1000000f leave; ret
+        0x000c:           'daaa' <pad>
+        """
+
         if isinstance(next_base, ROP):
             next_base = self.base
 
@@ -1401,18 +1550,18 @@ class ROP(object):
 
         Example:
 
-            Assume we have the following gadgets.
+        Assume we have the following gadgets.
 
-            Gadget01 ==> 1000: pop eax; ret
-            Gadget02 ==> 2000: mov ebx, eax; ret
-            Gadget03 ==> 3000: pop ecx; ret
-            Gadget04 ==> 4000: mov edx, ebx; ret
+        Gadget01 ==> 1000: pop eax; ret
+        Gadget02 ==> 2000: mov ebx, eax; ret
+        Gadget03 ==> 3000: pop ecx; ret
+        Gadget04 ==> 4000: mov edx, ebx; ret
 
-            The gadget graph will looks like this:
-            {Gadget01: [Gadget02],
-             Gadget02: [Gadget04],
-             Gadget03: [],
-             Gadget04: []}
+        The gadget graph will looks like this:
+        {Gadget01: [Gadget02],
+        Gadget02: [Gadget04],
+        Gadget03: [],
+        Gadget04: []}
         '''
         gadget_graph = {}
         for gad_1 in gadgets.values():
