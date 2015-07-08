@@ -496,6 +496,7 @@ class ROP(object):
         Example:
 
             Example for i386:
+
             >>> context.clear(arch='i386')
             >>> assembly  = 'pop eax; ret;'
             >>> assembly += 'mov ebx, eax; ret;'
@@ -515,8 +516,9 @@ class ROP(object):
             <setting eax>
             0x8049074 pop eax; ret
             0x1
-            
+
             Example for amd64:
+
             >>> context.clear(arch='amd64')
             >>> assembly  = 'pop rax; ret;'
             >>> assembly += 'mov rbx, rax; ret;'
@@ -526,19 +528,20 @@ class ROP(object):
             >>> con = {'rax': 1, 'rbx': 2, 'rcx': 3}
             >>> rop.setRegisters_print(con)
             <setting rcx>
-            0x6000b0 pop rax; ret
-            0x6000b1
-            0x6000b6 pop rcx; jmp rax
+            0x10000000 pop rax; ret
+            0x10000001
+            0x10000006 pop rcx; jmp rax
             0x3
             <setting rbx>
-            0x6000b0 pop rax; ret
+            0x10000000 pop rax; ret
             0x2
-            0x6000b2 mov rbx, rax; ret
+            0x10000002 mov rbx, rax; ret
             <setting rax>
-            0x6000b0 pop rax; ret
+            0x10000000 pop rax; ret
             0x1
 
-            Example for ARM:
+            Example for ARM - advance gadgets arrangement:
+
             >>> context.clear(arch='arm')
             >>> assembly  = 'pop {r0, pc};'
             >>> assembly += 'pop {r0, r1, pc};'
@@ -549,20 +552,23 @@ class ROP(object):
 
             >>> rop.setRegisters_print({'r4': 1})
             <setting r4>
-            0x9098 pop {r0, r1, pc}
+            0x10000004 pop {r0, r1, pc}
             0x1
-            0x90a4
-            0x90a8 mov r4, r0; blx r1
-            
-            Arm Example 02:
+            0x10000010
+            0x10000014 mov r4, r0; blx r1
+
+            Arm Example 02 - migrate to $sp:
+
             >>> context.clear(arch='arm')
             >>> assembly  = 'pop {lr};'
             >>> assembly += 'bx lr'
             >>> rop = ROP(ELF.from_assembly(assembly))
             >>> rop.setRegisters_print({'pc' : 1})
             <setting pc>
-            0x9094 pop {lr}; bx lr
+            0x10000000 pop {lr}; bx lr
             0x1
+
+            Arm Example 03 - migrate to $sp:
 
             >>> context.clear(arch='arm')
             >>> assembly = 'pop {pc}'
@@ -572,8 +578,10 @@ class ROP(object):
             0x10000000 pop {pc}
             0xdeadbeef
 
+            i386 Example - advance gadget arrangement:
+
             >>> context.clear(arch='i386')
-            >>> assembly  = shellcraft.read(0, 'esp', 0x1000) 
+            >>> assembly  = "read:" + shellcraft.read(0, 'esp', 0x1000)
             >>> assembly += 'pop eax; ret;'
             >>> assembly += 'xchg edx, ecx; jmp eax;'
             >>> assembly += 'pop ecx; ret'
@@ -587,6 +595,8 @@ class ROP(object):
             0x1000000e
             0x1000000f xchg edx, ecx; jmp eax
 
+            i386 Exmaple - check regs from the same origin:
+
             >>> context.clear(arch='i386')
             >>> assembly = 'mov eax, [esp]; pop ebx; ret'
             >>> rop = ROP(ELF.from_assembly(assembly))
@@ -598,6 +608,8 @@ class ROP(object):
             <setting ebx>
             0x10000003 pop ebx; ret
             0x1
+
+            i386 Example - handle overlapping ret address.
 
             >>> context.clear(arch='i386')
             >>> assembly  = 'add esp, 0x10; ret;'
@@ -617,6 +629,7 @@ class ROP(object):
             0x1000000c
             0xdeadbeef
 
+            i386 Example - complicated example.
             >>> context.clear(arch='i386')
             >>> assembly  = 'pop eax; ret;'
             >>> assembly += 'pop ebx; call eax;'
@@ -626,7 +639,7 @@ class ROP(object):
             >>> rop = ROP(ELF.from_assembly(assembly))
 
             >>> con = {'eax': 1, 'ebx': 2, 'ecx': 3, 'edx': 4}
-            
+
             >>> rop.setRegisters_print(con)
             <setting edx>
             0x10000000 pop eax; ret
@@ -650,6 +663,7 @@ class ROP(object):
             <setting eax>
             0x10000000 pop eax; ret
             0x1
+
         """
 
         # init GadgetSolver and GadgetClassify
@@ -804,7 +818,7 @@ class ROP(object):
         sources = []
         for reg in regs:
             sources.append(str(last_gadget.regs[reg]))
-        
+
         if len(set(sources)) < len(regs):
             return True
 
@@ -1382,21 +1396,23 @@ class ROP(object):
         self._chain.append(value)
 
     def migrate(self, next_base):
-        """A simple implementation for setting $sp.
-        
+        """
+        A simple implementation for setting $sp.
+
         >>> context.clear(arch='i386')
-        >>> assembly = shellcraft.read(0, 'esp', 0x1000)
-        >>> assembly += "pop ebp; ret;"
-        >>> assembly += "leave; ret;"
-        >>> rop = ROP(ELF.from_assembly(assembly))
-        
-        Migrate stack to 0x0.
-        >>> rop.migrate(0)
-        >>> print rop.dump()
+        >>> assembly = "pop ebp; ret;"
+        >>> assembly += "leave; ret"
+        >>> r = ROP(ELF.from_assembly(assembly))
+
+        Migrate stack to 0x0:
+
+        >>> r.migrate(0)
+        >>> print r.dump()
         0x0000:       0x1000000d pop ebp; ret
         0x0004:       0xfffffffc
         0x0008:       0x1000000f leave; ret
         0x000c:           'daaa' <pad>
+
         """
 
         if isinstance(next_base, ROP):
