@@ -806,13 +806,16 @@ class GadgetDatabase(object):
             return None
         
         log.info_once("Loaded cached gadgets for %r" % self.elfname)
-        
-        gadgets = self.db["gadgets"].values()
 
-        for gadget in gadgets:
+        result_1={}
+        gadgets = self.db["gadgets"]
+        result_1.update(gadgets)
+        result_2 = copy.deepcopy(result_1)
+
+        for gadget in result_2.values():
             gadget.address += self.bin_addr
             out[gadget.address] = gadget
-         
+
         return out
 
 
