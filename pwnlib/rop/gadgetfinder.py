@@ -98,8 +98,9 @@ class GadgetMapper(object):
         The CPU used is x86, but that may be changed really easily, so no biggie.
 
         Taken from https://github.com/0vercl0k/stuffz/blob/master/look_for_gadgets_with_equations.py'''
-        from amoco.arch.arm.v7.env import internals
-        internals["isetstate"] = state
+        if self.arch == CS_ARCH_ARM:
+            from amoco.arch.arm.v7.env import internals
+            internals["isetstate"] = state
 
         p = amoco.system.raw.RawExec(
             amoco.system.core.DataIO(code), self.cpu
@@ -122,8 +123,8 @@ class GadgetMapper(object):
 
             try:
                 mp >>= block.map
-            except:
-                mp = None
+            except Exception as e:
+                pass
 
         return mp
 

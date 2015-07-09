@@ -517,67 +517,6 @@ class ROP(object):
             0x8049074 pop eax; ret
             0x1
 
-            Example for amd64:
-
-            >>> context.clear(arch='amd64')
-            >>> assembly  = 'pop rax; ret;'
-            >>> assembly += 'mov rbx, rax; ret;'
-            >>> assembly += 'pop rcx; jmp rax'
-            >>> rop = ROP(ELF.from_assembly(assembly))
-
-            >>> con = {'rax': 1, 'rbx': 2, 'rcx': 3}
-            >>> rop.setRegisters_print(con)
-            <setting rcx>
-            0x10000000 pop rax; ret
-            0x10000001
-            0x10000006 pop rcx; jmp rax
-            0x3
-            <setting rbx>
-            0x10000000 pop rax; ret
-            0x2
-            0x10000002 mov rbx, rax; ret
-            <setting rax>
-            0x10000000 pop rax; ret
-            0x1
-
-            Example for ARM - advance gadgets arrangement:
-
-            >>> context.clear(arch='arm')
-            >>> assembly  = 'pop {r0, pc};'
-            >>> assembly += 'pop {r0, r1, pc};'
-            >>> assembly += 'pop {r0, r2, pc};'
-            >>> assembly += 'mov r3, r2; pop {pc};'
-            >>> assembly += 'mov r4, r0; blx r1'
-            >>> rop = ROP(ELF.from_assembly(assembly))
-
-            >>> rop.setRegisters_print({'r4': 1})
-            <setting r4>
-            0x10000004 pop {r0, r1, pc}
-            0x1
-            0x10000010
-            0x10000014 mov r4, r0; blx r1
-
-            Arm Example 02 - migrate to $sp:
-
-            >>> context.clear(arch='arm')
-            >>> assembly  = 'pop {lr};'
-            >>> assembly += 'bx lr'
-            >>> rop = ROP(ELF.from_assembly(assembly))
-            >>> rop.setRegisters_print({'pc' : 1})
-            <setting pc>
-            0x10000000 pop {lr}; bx lr
-            0x1
-
-            Arm Example 03 - migrate to $sp:
-
-            >>> context.clear(arch='arm')
-            >>> assembly = 'pop {pc}'
-            >>> rop = ROP(ELF.from_assembly(assembly))
-            >>> rop.setRegisters_print({'pc' : 0xdeadbeef})
-            <setting pc>
-            0x10000000 pop {pc}
-            0xdeadbeef
-
             i386 Example - advance gadget arrangement:
 
             >>> context.clear(arch='i386')
@@ -663,6 +602,67 @@ class ROP(object):
             <setting eax>
             0x10000000 pop eax; ret
             0x1
+
+            Example for amd64:
+
+            >>> context.clear(arch='amd64')
+            >>> assembly  = 'pop rax; ret;'
+            >>> assembly += 'mov rbx, rax; ret;'
+            >>> assembly += 'pop rcx; jmp rax'
+            >>> rop = ROP(ELF.from_assembly(assembly))
+
+            >>> con = {'rax': 1, 'rbx': 2, 'rcx': 3}
+            >>> rop.setRegisters_print(con)
+            <setting rcx>
+            0x10000000 pop rax; ret
+            0x10000001
+            0x10000006 pop rcx; jmp rax
+            0x3
+            <setting rbx>
+            0x10000000 pop rax; ret
+            0x2
+            0x10000002 mov rbx, rax; ret
+            <setting rax>
+            0x10000000 pop rax; ret
+            0x1
+
+            Example for ARM - advance gadgets arrangement:
+
+            >>> context.clear(arch='arm')
+            >>> assembly  = 'pop {r0, pc};'
+            >>> assembly += 'pop {r0, r1, pc};'
+            >>> assembly += 'pop {r0, r2, pc};'
+            >>> assembly += 'mov r3, r2; pop {pc};'
+            >>> assembly += 'mov r4, r0; blx r1'
+            >>> rop = ROP(ELF.from_assembly(assembly))
+
+            >>> rop.setRegisters_print({'r4': 1})
+            <setting r4>
+            0x10000004 pop {r0, r1, pc}
+            0x1
+            0x10000010
+            0x10000014 mov r4, r0; blx r1
+
+            Arm Example 02 - migrate to $sp:
+
+            >>> context.clear(arch='arm')
+            >>> assembly  = 'pop {lr};'
+            >>> assembly += 'bx lr'
+            >>> rop = ROP(ELF.from_assembly(assembly))
+            >>> rop.setRegisters_print({'pc' : 1})
+            <setting pc>
+            0x10000000 pop {lr}; bx lr
+            0x1
+
+            Arm Example 03 - migrate to $sp:
+
+            >>> context.clear(arch='arm')
+            >>> assembly = 'pop {pc}'
+            >>> rop = ROP(ELF.from_assembly(assembly))
+            >>> rop.setRegisters_print({'pc' : 0xdeadbeef})
+            <setting pc>
+            0x10000000 pop {pc}
+            0xdeadbeef
 
         """
 
