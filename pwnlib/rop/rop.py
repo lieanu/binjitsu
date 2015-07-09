@@ -1145,6 +1145,9 @@ class ROP(object):
             elif isinstance(slot, Call):
                 stack.describe(self.describe(slot))
 
+                # setRegister cannot handle the Constant object args.
+                slot.args = [ i if not isinstance(i, constants.Constant) else int(i) for i in slot.args]
+
                 registers    = dict(zip(slot.abi.register_arguments, slot.args))
                 tail = None
                 operand = ""
