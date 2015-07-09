@@ -569,6 +569,7 @@ class ROP(object):
             0xdeadbeef
 
             i386 Example - complicated example.
+
             >>> context.clear(arch='i386')
             >>> assembly  = 'pop eax; ret;'
             >>> assembly += 'pop ebx; call eax;'
@@ -576,9 +577,7 @@ class ROP(object):
             >>> assembly += 'xchg edx, ecx; jmp eax;'
             >>> assembly += 'mov edi, edx; ret'
             >>> rop = ROP(ELF.from_assembly(assembly))
-
             >>> con = {'eax': 1, 'ebx': 2, 'ecx': 3, 'edx': 4}
-
             >>> rop.setRegisters_print(con)
             <setting edx>
             0x10000000 pop eax; ret
@@ -610,7 +609,6 @@ class ROP(object):
             >>> assembly += 'mov rbx, rax; ret;'
             >>> assembly += 'pop rcx; jmp rax'
             >>> rop = ROP(ELF.from_assembly(assembly))
-
             >>> con = {'rax': 1, 'rbx': 2, 'rcx': 3}
             >>> rop.setRegisters_print(con)
             <setting rcx>
@@ -635,7 +633,6 @@ class ROP(object):
             >>> assembly += 'mov r3, r2; pop {pc};'
             >>> assembly += 'mov r4, r0; blx r1'
             >>> rop = ROP(ELF.from_assembly(assembly))
-
             >>> rop.setRegisters_print({'r4': 1})
             <setting r4>
             0x10000004 pop {r0, r1, pc}
@@ -663,7 +660,6 @@ class ROP(object):
             <setting pc>
             0x10000000 pop {pc}
             0xdeadbeef
-
         """
 
         # init GadgetSolver and GadgetClassify
