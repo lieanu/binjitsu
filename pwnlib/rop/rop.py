@@ -417,6 +417,8 @@ class ROP(object):
         self.initialized = False
         self.__init_arch_info()
 
+        self.gadget_graph = self.build_graph(self.gadgets)
+
     @staticmethod
     @LocalContext
     def from_blob(blob, *a, **kw):
@@ -445,7 +447,6 @@ class ROP(object):
         Because of `amoco` has a large initialization-time penalty.
         """
         if not self.initialized:
-            self.gadget_graph = self.build_graph(self.gadgets)
 
             self._global_delete_gadget = {}
             ggh = copy.deepcopy(self.gadget_graph)
@@ -1539,11 +1540,18 @@ class ROP(object):
         #
         # Check for a '_'-delimited list of registers
         #
-        x86_suffixes = ['ax', 'bx', 'cx', 'dx', 'bp', 'sp', 'di', 'si',
-                        'r8', 'r9', '10', '11', '12', '13', '14', '15']
+        reg_suffixes = []
+        if self.arch == "i386" or self.arch == "amd64":
+            reg_suffixes = ['ax', 'bx', 'cx', 'dx', 'bp', 'sp', 'di', 'si',
+                            'r8', 'r9', '10', '11', '12', '13', '14', '15']
+        elif self.arch == "arm":
+            reg_suffixes = ["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9",
+                            "10", "11", "12", "13", "14", "15", "sp", "lr", "pc", "fp"]
 
-        if all(map(lambda x: x[-2:] in x86_suffixes, attr.split('_'))):
-            return self.search(regs=attr.split('_'), order='regs')
+        if all(map(lambda x: x[-2:] in reg_suffixes, attr.split('_'))):
+            regs = attr.split('_')
+            gadgets = self.search_path(self.SP, regs)
+            return gadgets
 
         #
         # Otherwise, assume it's a rop.call() shorthand
