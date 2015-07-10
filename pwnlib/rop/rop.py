@@ -1498,9 +1498,9 @@ class ROP(object):
 
         >>> elf=ELF(which('bash'))
         >>> rop=ROP([elf])
-        >>> rop.rdi     == rop.search(regs=['rdi'], order = 'regs')
+        >>> rop.rdi     == rop.search_path("rsp", regs=['rdi'])
         True
-        >>> rop.r13_r14_r15_rbp == rop.search(regs=['r13','r14','r15','rbp'], order = 'regs')
+        >>> rop.r13_r14_r15_rbp == rop.search_path("rsp", regs=['r13','r14','r15','rbp'])
         True
         >>> rop.ret_8   == rop.search(move=8)
         True
