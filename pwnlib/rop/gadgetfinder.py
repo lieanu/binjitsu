@@ -73,17 +73,18 @@ class GadgetMapper(object):
 
         Return:
             A mapper object.
-            Example:
 
-            >>> context.clear(arch="amd64")
-            >>> se = GadgetMapper(CS_ARCH_X86, CS_MODE_64)
-            >>> print se.sym_exec_gadget_and_get_mapper(asm("pop rdi; ret"))
-            rdi <- { | [0:64]->M64(rsp) | }
-            rsp <- { | [0:64]->(rsp+0x10) | }
-            rip <- { | [0:64]->M64(rsp+8) | }
+        Example:
+
+        >>> context.clear(arch="amd64")
+        >>> se = GadgetMapper(CS_ARCH_X86, CS_MODE_64)
+        >>> print se.sym_exec_gadget_and_get_mapper(asm("pop rdi; ret"))
+        rdi <- { | [0:64]->M64(rsp) | }
+        rsp <- { | [0:64]->(rsp+0x10) | }
+        rip <- { | [0:64]->M64(rsp+8) | }
 
         Note that `call`s will be neutralized in order to not mess-up the
-        symbolic execution (otherwise the instruction just after the `call
+        symbolic execution (otherwise the instruction just after the `call`
         is considered as the instruction being jumped to).
 
         From this ``mapper`` object you can reconstruct the symbolic CPU state
@@ -129,13 +130,6 @@ class GadgetMapper(object):
 
 class GadgetClassifier(GadgetMapper):
     r"""Classify gadgets to decide its sp_move value and regs relationship.
-
-    Example:
-
-    .. code-block:: python
-        gc = GadgetClassifier("amd64")
-        newGadget = gc.classify(oldGadget)
-
     """
 
     def __init__(self, arch, mode):
@@ -367,11 +361,9 @@ class GadgetFinder(object):
 
     Example:
 
-    .. code-block:: python
-
-        elf = ELF('ropasaurusrex')
-        gf = GadgetFinder(elf)
-        gadgets = gf.load_gadgets()
+    elf = ELF('path-to-binary')
+    gf = GadgetFinder(elf)
+    gadgets = gf.load_gadgets()
 
     """
 
