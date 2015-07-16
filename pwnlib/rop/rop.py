@@ -894,6 +894,9 @@ class ROP(object):
                 if isinstance(pc_reg, Mem):
                     condition = {self.PC: return_to_stack_gadget.address}
 
+                    additional["; ".join(gadget.insns)] = return_to_stack_gadget
+                    front_path += [gadget]
+
                 elif isinstance(pc_reg, (str, unicode)):
                     condition = {pc_reg: return_to_stack_gadget.address}
 

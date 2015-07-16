@@ -684,10 +684,13 @@ class GadgetFinder(object):
         """Caculate branch number for __passClean().
         """
         count = 0
-        pop_pc = re.compile('^pop.* \{.*pc\}')
+        ldm     = re.compile(r"^ldm.*sp!, \{.*\}")
+        pop_pc  = re.compile('^pop.* \{.*pc\}')
         for inst in decodes:
             insns = inst.mnemonic + " " + inst.op_str
             if pop_pc.match(insns):
+                count += 1
+            elif ldm.match(insns):
                 count += 1
 
             for group in branch_groups:
@@ -713,6 +716,7 @@ class GadgetFinder(object):
         int80   = re.compile(r'int +0x80')
         ret     = re.compile(r'^ret$')
         svc     = re.compile(r'^svc$')
+        ldm     = re.compile(r"^ldm.*sp!, \{.*\}")
 
         first_instr = (decodes[0].mnemonic + " " + decodes[0].op_str)
         last_instr  = (decodes[-1].mnemonic + " " + decodes[-1].op_str)
@@ -734,7 +738,7 @@ class GadgetFinder(object):
         if len(decodes) > 5:
             return False
 
-        if (not pop_pc.match(last_instr)) and (not (set(decodes[-1].groups) & set(branch_groups))):
+        if (not pop_pc.match(last_instr)) and (not ldm.match(last_instr)) and (not (set(decodes[-1].groups) & set(branch_groups))):
             return False
 
         branch_num = self.__checkMultiBr(decodes, branch_groups)
