@@ -65,7 +65,7 @@ class GadgetMapper(object):
 
     @LocalContext
     def sym_exec_gadget_and_get_mapper(self, code, state=0):
-        '''This function gives you a ``mapper`` object from assembled `code`.
+        r'''This function gives you a ``mapper`` object from assembled `code`.
         `code` will basically be our assembled gadgets.
 
         Arguments:
@@ -74,13 +74,13 @@ class GadgetMapper(object):
         Return:
             A mapper object.
             Example:
-                [u'pop rdi', u'ret '] ==> "\x5f\xc3"
-                sym_exec_gadget_and_get_mapper("\x5f\xc3")
 
-                Return a mapper object:
-                    rdi <- { | [0:64]->M64(rsp) | }
-                    rip <- { | [0:64]->M64(rsp+8) | }
-                    rsp <- { | [0:64]->(rsp+0x10) | }
+            >>> context.clear(arch="amd64")
+            >>> se = GadgetMapper(CS_ARCH_X86, CS_MODE_64)
+            >>> print se.sym_exec_gadget_and_get_mapper(asm("pop rdi; ret"))
+            rdi <- { | [0:64]->M64(rsp) | }
+            rsp <- { | [0:64]->(rsp+0x10) | }
+            rip <- { | [0:64]->M64(rsp+8) | }
 
         Note that `call`s will be neutralized in order to not mess-up the
         symbolic execution (otherwise the instruction just after the `call
@@ -143,7 +143,7 @@ class GadgetClassifier(GadgetMapper):
 
 
     def classify(self, gadget):
-        """Classify gadgets, get the regs relationship, and sp move.
+        r"""Classify gadgets, get the regs relationship, and sp move.
 
         Arguments:
             gadget(Gadget object), with sp == 0 and regs = {}
@@ -152,7 +152,7 @@ class GadgetClassifier(GadgetMapper):
             Gadget object with correct sp move value and regs relationship
 
         Example:
-            >>> from capstone    import CS_ARCH_X86, CS_MODE_64
+
             >>> context.clear(arch='amd64')
             >>> gadget_to_be_classify = Gadget(0x1000, [u'pop rdi', u'ret'], {}, 0x0, "\x5f\xc3")
             >>> gc = GadgetClassifier(CS_ARCH_X86, CS_MODE_64)
@@ -274,18 +274,17 @@ class GadgetClassifier(GadgetMapper):
 
 
 class GadgetSolver(GadgetMapper):
-    r"""Solver a gadget path to satisfy some conditions.
-
-    Example:
-
-    .. code-block:: python
-        gs = GadgetSolver(CS_ARCH_X86, CS_MODE_64)
-        conditions = {"rdi" : 0xbeefdead}
-        sp_move, stack_result = gs.verify_path(gadget_path, conditions)
-
-    """
 
     def __init__(self, arch, mode):
+        r"""Solver a gadget path to satisfy some conditions.
+
+        Example:
+
+        >>> gadget_path = [Gadget(0x1000, [u'pop rdi', u'ret'], {}, 0x0, "\x5f\xc3")]
+        >>> gs = GadgetSolver(CS_ARCH_X86, CS_MODE_64)
+        >>> conditions = {"rdi" : 0xbeefdead}
+        >>> sp_move, stack_result = gs.verify_path(gadget_path, conditions)
+        """
         super(GadgetSolver, self).__init__(arch, mode)
 
     def _prove(self, expression):
@@ -364,7 +363,7 @@ class GadgetSolver(GadgetMapper):
 
 
 class GadgetFinder(object):
-    r"""Finding gadgets for specified elfs.
+    """Finding gadgets for specified elfs.
 
     Example:
 

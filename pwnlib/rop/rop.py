@@ -334,6 +334,9 @@ class ROP(object):
     0x0078:             0x2b ss
     0x007c:              0x0 fpstate
 
+    >>> assembly += "; pop ebx; ret"
+    >>> e = ELF.from_assembly(assembly)
+    >>> e.symbols['funcname'] = e.address + 0x1234
     >>> r = ROP(e, 0x8048000)
     >>> r.funcname(1, 2)
     >>> r.funcname(3)
@@ -604,28 +607,6 @@ class ROP(object):
             0x2
             <setting eax>
             0x10000000 pop eax; ret
-            0x1
-
-            Example for amd64:
-
-            >>> context.clear(arch='amd64')
-            >>> assembly  = 'pop rax; ret;'
-            >>> assembly += 'mov rbx, rax; ret;'
-            >>> assembly += 'pop rcx; jmp rax'
-            >>> rop = ROP(ELF.from_assembly(assembly))
-            >>> con = {'rax': 1, 'rbx': 2, 'rcx': 3}
-            >>> rop.setRegisters_print(con)
-            <setting rcx>
-            0x10000000 pop rax; ret
-            0x10000001
-            0x10000006 pop rcx; jmp rax
-            0x3
-            <setting rbx>
-            0x10000000 pop rax; ret
-            0x2
-            0x10000002 mov rbx, rax; ret
-            <setting rax>
-            0x10000000 pop rax; ret
             0x1
 
             Example for ARM - advance gadgets arrangement:
