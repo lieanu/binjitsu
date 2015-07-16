@@ -505,17 +505,17 @@ class ROP(object):
             >>> rop = ROP(ELF.from_assembly(assembly))
             >>> con = {'eax':1, 'ebx':2, 'ecx':3}
             >>> rop.setRegisters_print(con)
-            <setting ecx>
-            0x8049074 pop eax; ret
-            0x8049074
-            0x8049079 pop ecx; call eax
-            0x3
             <setting ebx>
-            0x8049074 pop eax; ret
+            0x10000000 pop eax; ret
             0x2
-            0x8049076 mov ebx, eax; ret
+            0x10000002 mov ebx, eax; ret
+            <setting ecx>
+            0x10000000 pop eax; ret
+            0x10000000
+            0x10000005 pop ecx; call eax
+            0x3
             <setting eax>
-            0x8049074 pop eax; ret
+            0x10000000 pop eax; ret
             0x1
 
             i386 Example - advance gadget arrangement:
@@ -1408,9 +1408,9 @@ class ROP(object):
 
         >>> r.migrate(0)
         >>> print r.dump()
-        0x0000:       0x1000000d pop ebp; ret
+        0x0000:       0x10000000 pop ebp; ret
         0x0004:       0xfffffffc
-        0x0008:       0x1000000f leave; ret
+        0x0008:       0x10000002 leave; ret
         0x000c:           'daaa' <pad>
 
         """
@@ -1496,15 +1496,22 @@ class ROP(object):
         Also provides a shorthand for ``.call()``:
             ``rop.function(args)`` is equivalent to ``rop.call(function, args)``
 
-        >>> elf=ELF(which('bash'))
-        >>> rop=ROP([elf])
-        >>> rop.rdi     == rop.search_path("rsp", regs=['rdi'])
+        >>> assembly  = 'pop eax; ret;'
+        >>> assembly += 'pop ebx; ret;'
+        >>> assembly += 'pop ecx; ret;'
+        >>> assembly += 'pop edx; ret;'
+        >>> assembly += 'pop eax; pop ebx; ret;'
+        >>> assembly += 'pop eax; pop ecx; pop ebx; ret;'
+        >>> assembly += 'leave;'
+        >>> assembly += 'ret;'
+        >>> rop = ROP(ELF.from_assembly(assembly))
+        >>> rop.eax == rop.search_path("esp", regs=['eax'])
         True
-        >>> rop.r13_r14_r15_rbp == rop.search_path("rsp", regs=['r13','r14','r15','rbp'])
+        >>> rop.eax_ecx_ebx == rop.search_path("esp", regs=['eax', 'ecx', 'ebx'])
         True
-        >>> rop.ret_8   == rop.search(move=8)
+        >>> rop.ret_8 == rop.search(move=8)
         True
-        >>> rop.ret     != None
+        >>> rop.ret != None
         True
         """
         gadget = collections.namedtuple('gadget', ['address', 'details'])

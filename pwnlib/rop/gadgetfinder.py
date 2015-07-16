@@ -15,11 +15,6 @@ from ..log     import getLogger
 from ..elf     import ELF
 from .gadgets  import Gadget, Mem
 
-import amoco
-import amoco.system.raw
-import amoco.system.core
-import amoco.cas.smt
-
 from BTrees.OOBTree import OOBTree
 from amoco.cas.expressions import *
 from z3          import *
@@ -102,9 +97,14 @@ class GadgetMapper(object):
             from amoco.arch.arm.v7.env import internals
             internals["isetstate"] = state
 
+        import amoco
+        import amoco.system.raw
+        import amoco.system.core
+
         p = amoco.system.raw.RawExec(
             amoco.system.core.DataIO(code), self.cpu
         )
+
         try:
             blocks = list(amoco.lsweep(p).iterblocks())
         except:
