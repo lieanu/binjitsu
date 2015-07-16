@@ -9,7 +9,7 @@ import hashlib
 import tempfile
 import operator
 
-from ..context import context
+from ..context  import context, LocalContext
 from ..asm     import *
 from ..log     import getLogger
 from ..elf     import ELF
@@ -35,6 +35,7 @@ class GadgetMapper(object):
 
     """
 
+    @LocalContext
     def __init__(self, arch, mode):
         '''Base class which can symbolic execution gadget instructions.
         '''
@@ -42,20 +43,17 @@ class GadgetMapper(object):
 
         if arch == CS_ARCH_X86 and mode == CS_MODE_32:
             import amoco.arch.x86.cpu_x86 as cpu
-            self.align = 4
         elif arch == CS_ARCH_X86 and mode == CS_MODE_64:
             import amoco.arch.x64.cpu_x64 as cpu
-            self.align = 8
         elif arch == CS_ARCH_ARM and mode == CS_MODE_ARM:
             import amoco.arch.arm.cpu_armv7 as cpu
-            self.align = 4
         elif arch == CS_ARCH_ARM and mode == CS_MODE_THUMB:
             import amoco.arch.arm.cpu_armv7 as cpu
-            self.align = 4
         else:
             raise Exception("Unsupported archtecture %s." % arch)
 
         self.cpu = cpu
+        self.align = context.bits / 8
 
         self.CALL = {CS_ARCH_X86: "call",   CS_ARCH_ARM: "blx"}[self.arch]
         self.FLAG = {CS_ARCH_X86: "flags",  CS_ARCH_ARM: "apsr"}[self.arch]
@@ -65,6 +63,7 @@ class GadgetMapper(object):
         self.IP   = {CS_ARCH_X86: "ip",     CS_ARCH_ARM: "pc"}[self.arch]
 
 
+    @LocalContext
     def sym_exec_gadget_and_get_mapper(self, code, state=0):
         '''This function gives you a ``mapper`` object from assembled `code`.
         `code` will basically be our assembled gadgets.
@@ -377,6 +376,7 @@ class GadgetFinder(object):
 
     """
 
+    @LocalContext
     def __init__(self, input, arch="i386", gadget_filter="all", depth=10):
 
         import capstone
@@ -457,14 +457,17 @@ class GadgetFinder(object):
                 "arm"   : (CS_ARCH_ARM, CS_MODE_ARM,    arm_gadget[gadget_filter]),
                 "thumb" : (CS_ARCH_ARM, CS_MODE_THUMB,  arm_thumb[gadget_filter]),
                 }
-        bin_arch = self.elfs[0].arch
+
+        if self.elfs[0].arch != context.arch:
+            log.error("Context arch should be the same as binary arch.")
+
         data_len = len(self.elfs[0].file.read())
 
-        if bin_arch not in self.arch_mode_gadget.keys():
+        if context.arch not in self.arch_mode_gadget.keys():
             raise Exception("Architecture not supported.")
 
 
-        self.arch, self.mode, self.gadget_re = self.arch_mode_gadget[bin_arch]
+        self.arch, self.mode, self.gadget_re = self.arch_mode_gadget[context.arch]
         self.need_filter = False
         if data_len >= MAX_SIZE*1000:
             self.need_filter = True

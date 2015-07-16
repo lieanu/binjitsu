@@ -389,6 +389,7 @@ class ROP(object):
     #: which is not contiguous
     migrated = False
 
+    @LocalContext
     def __init__(self, elfs, base = None, **kwargs):
         """
         Arguments:
@@ -403,10 +404,12 @@ class ROP(object):
         self.elfs = elfs
         self._chain = []
         self.base = base
-        self.align = max((e.elfclass for e in elfs)) / 8
+        self.align = context.bits / 8
         self.migrated = False
 
-        self.arch = elfs[0].arch
+        if elfs[0].arch != context.arch:
+            log.error("Context arch should be the same as binary arch.")
+        self.arch = context.arch
 
         #Find all gadgets
         gf = GadgetFinder(elfs, "all")
