@@ -55,7 +55,6 @@ i386 Example:
 
 amd64 Example:
 
-    >>> message = "Hello, World"
     >>> context.clear()
     >>> context.arch = "amd64"
     >>> assembly =  'read:'      + shellcraft.read(constants.STDIN_FILENO, 'rsp', 1024)
@@ -79,7 +78,87 @@ amd64 Example:
     >>> p.wait_for_close()
     >>> p.poll() == 0
     True
+
+arm Example:
+
+    >>> context.clear()
+    >>> context.arch = "arm"
+    >>> assembly =  'read:'      + shellcraft.read(constants.STDIN_FILENO, 'sp', 1024)
+    >>> assembly += 'sigreturn:' + shellcraft.sigreturn()
+    >>> assembly += 'int3:'      + shellcraft.trap()
+    >>> assembly += 'syscall: '  + shellcraft.syscall()
+    >>> assembly += 'exit: '     + 'eor r0, r0; mov r7, 0x1; swi #0;'
+    >>> assembly += 'message: '  + ('.asciz "%s"' % message)
+    >>> binary = ELF.from_assembly(assembly)
+    >>> frame = SigreturnFrame()
+    >>> frame.r7 = constants.SYS_write
+    >>> frame.r0 = constants.STDOUT_FILENO
+    >>> frame.r1 = binary.symbols['message']
+    >>> frame.r2 = len(message)
+    >>> frame.sp = 0xdead0000
+    >>> frame.pc = binary.symbols['syscall']
+    >>> p = process(binary.path)
+    >>> p.send(str(frame))
+    >>> p.recvn(len(message)) == message
+    True
+    >>> p.wait_for_close()
+    >>> p.poll() == 0
+    True
+
+Mips Example:
+
+    >>> context.clear()
+    >>> context.arch = "mips"
+    >>> context.endian = "big"
+    >>> assembly =  'read:'      + shellcraft.read(constants.STDIN_FILENO, 'sp', 1024)
+    >>> assembly += 'sigreturn:' + shellcraft.sigreturn()
+    >>> assembly += 'syscall: '  + shellcraft.syscall()
+    >>> assembly += 'exit: '     + 'xor $a0, $a0, $a0; li $v0, 0xfa1; syscall;'
+    >>> assembly += 'message: '  + ('.asciz "%s"' % message)
+    >>> binary = ELF.from_assembly(assembly)
+    >>> frame = SigreturnFrame()
+    >>> frame.v0 = 0xfa4
+    >>> frame.a0 = constants.STDOUT_FILENO
+    >>> frame.a1 = binary.symbols['message']
+    >>> frame.a2 = len(message)
+    >>> frame.sp = 0xdead0000
+    >>> frame.pc = binary.symbols['syscall']
+    >>> p = process(binary.path)
+    >>> p.send(str(frame))
+    >>> p.recvn(len(message)) == message
+    True
+    >>> p.wait_for_close()
+    >>> p.poll() == 0
+    True
+
+Mipsel Example:
+
+    >>> context.clear()
+    >>> context.arch = "mips"
+    >>> context.endian = "little"
+    >>> assembly =  'read:'      + shellcraft.read(constants.STDIN_FILENO, 'sp', 1024)
+    >>> assembly += 'sigreturn:' + shellcraft.sigreturn()
+    >>> assembly += 'syscall: '  + shellcraft.syscall()
+    >>> assembly += 'exit: '     + 'xor $a0, $a0, $a0; li $v0, 0xfa1; syscall;'
+    >>> assembly += 'message: '  + ('.asciz "%s"' % message)
+    >>> binary = ELF.from_assembly(assembly)
+    >>> frame = SigreturnFrame()
+    >>> frame.v0 = 0xfa4
+    >>> frame.a0 = constants.STDOUT_FILENO
+    >>> frame.a1 = binary.symbols['message']
+    >>> frame.a2 = len(message)
+    >>> frame.sp = 0xdead0000
+    >>> frame.pc = binary.symbols['syscall']
+    >>> p = process(binary.path)
+    >>> p.send(str(frame))
+    >>> p.recvn(len(message)) == message
+    True
+    >>> p.wait_for_close()
+    >>> p.poll() == 0
+    True
+
 """
+
 from collections import namedtuple
 
 from ..abi import ABI
@@ -123,6 +202,10 @@ registers = {
                    144: 't5', 152: 't6', 160: 't7', 168: 's0', 176: 's1', 184: 's2', 192: 's3', 200: 's4',
                    208: 's5', 216: 's6', 224: 's7', 232: 't8', 240: 't9', 248: 'k0', 256: 'k1', 264: 'gp',
                    272: 'sp', 280: 's8', 288: 'ra'},
+        'aarch64': {312: 'x0', 320: 'x1', 328: 'x2', 336: 'x3', 344: 'x4', 352: 'x5', 360: 'x6',
+                    368: 'x7', 376: 'x8', 384: 'x9', 392: 'x10', 400: 'x11', 408: 'x12', 416: 'x13',
+                    424: 'x14', 432: 'x15', 440: 'x16', 448: 'x17', 456: 'x26', 528: 'x27', 536: 'x28',
+                    544: 'x29', 552: 'x30', 560: 'sp', 568: 'pc', 592: 'magic'}
 }
 
 defaults = {
@@ -130,21 +213,24 @@ defaults = {
     "i386_on_amd64": {"cs": 0x23, "ss": 0x2b},
     "amd64": {"csgsfs": 0x33},
     "arm": {"trap_no": 0x6, "cpsr": 0x40000010, "VFPU-magic": 0x56465001, "VFPU-size": 0x120},
-    "mips": {}
+    "mips": {},
+    "aarch64": {"magic": 0x0000021046508001},
 }
 
 instruction_pointers = {
     'i386': 'eip',
     'amd64': 'rip',
     'arm': 'pc',
-    'mips': 'pc'
+    'mips': 'pc',
+    'aarch64': 'pc',
 }
 
 stack_pointers = {
     'i386': 'esp',
     'amd64': 'rsp',
     'arm': 'sp',
-    'mips': 'sp'
+    'mips': 'sp',
+    'aarch64': 'sp',
 }
 
 # # XXX Need to add support for Capstone in order to extract ARM and MIPS
@@ -242,6 +328,21 @@ class SigreturnFrame(dict):
         >>> assert len(str(s)) == 292
         >>> unpack_many(str(s))
         [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4125, 0, 0, 0, 6295552, 0, 4096, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+        Crafting a SigreturnFrame that calls mprotect on Aarch64
+
+        >>> context.clear()
+        >>> context.endian = "little"
+        >>> s = SigreturnFrame(arch='aarch64')
+        >>> unpack_many(str(s))
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1179680769, 528]
+        >>> s.x8 = 0xe2
+        >>> s.x0 = 0x4000
+        >>> s.x1 = 0x1000
+        >>> s.x2 = 0x7
+        >>> assert len(str(s)) == 600
+        >>> unpack_many(str(s))
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16384, 0, 4096, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 226, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1179680769, 528]
     """
 
     arch = None

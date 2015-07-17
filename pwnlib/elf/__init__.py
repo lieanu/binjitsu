@@ -32,19 +32,6 @@ def load(*args, **kwargs):
 # Monkey-patch some things inside elftools to make life easier
 
 class ELF(ELFFile):
-
-    #: Bit-ness of the file
-    bits = None
-
-    #: Architecture of the file
-    arch = None
-
-    #: Endianness of the file
-    endian = None
-
-    #: Path to the file
-    path = None
-
     """Encapsulates information about an ELF file.
 
     :ivar path: Path to the binary on disk
@@ -77,16 +64,19 @@ class ELF(ELFFile):
 
         super(ELF,self).__init__(self.mmap)
 
+        #: Path to the file
         self.path = os.path.abspath(path)
+        #: Architecture of the file
         self.arch = self.get_machine_arch().lower()
 
-        # Check endianness
+        #: Endianness of the file
         self.endian = {
             'ELFDATANONE': 'little',
             'ELFDATA2LSB': 'little',
             'ELFDATA2MSB': 'big'
         }[self['e_ident']['EI_DATA']]
 
+        #: Bit-ness of the file
         self.bits = self.elfclass
 
         if self.arch == 'mips':
@@ -120,7 +110,7 @@ class ELF(ELFFile):
 
         Example:
 
-            >>> e = ELF.from_assembly('nop; foo: int 0x80', vma = 0x40000)
+            >>> e = ELF.from_assembly('nop; foo: int 0x80', vma = 0x400000)
             >>> e.symbols['foo'] = 0x400001
             >>> e.disasm(e.entry, 1)
             '  400000:       90                      nop'
@@ -132,7 +122,7 @@ class ELF(ELFFile):
     @staticmethod
     @LocalContext
     def from_bytes(bytes, *a, **kw):
-        """Given a sequence of bytes, return a fully loaded ELF object
+        r"""Given a sequence of bytes, return a fully loaded ELF object
         which contains those bytes at its entry point.
 
         Arguments:
@@ -144,8 +134,8 @@ class ELF(ELFFile):
 
             >>> e = ELF.from_bytes('\x90\xcd\x80', vma=0xc000)
             >>> print(e.disasm(e.entry, 3))
-                c054:       90                      nop
-                c055:       cd 80                   int    0x80
+                c000:       90                      nop
+                c001:       cd 80                   int    0x80
         """
         return ELF(make_elf(bytes, extract=False, *a, **kw))
 

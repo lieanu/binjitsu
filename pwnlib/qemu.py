@@ -1,7 +1,17 @@
 from .context import context, LocalContext
+from .util import misc
 
 @LocalContext
 def get_qemu_arch():
+    """
+    Returns the name which QEMU uses for the currently selected
+    architecture.
+
+    >>> get_qemu_arch()
+    'i386'
+    >>> get_qemu_arch(arch='powerpc')
+    'ppc'
+    """
     return {
         ('amd64', 'little'):     'x86_64',
         ('arm', 'big'):          'armeb',
@@ -13,3 +23,26 @@ def get_qemu_arch():
         ('thumb', 'little'):     'arm',
         ('thumb', 'big'):        'armeb',
     }.get((context.arch, context.endian), context.arch)
+
+@LocalContext
+def get_qemu_user():
+    """
+    Returns the path to the QEMU-user binary for the currently
+    selected architecture.
+
+    >>> get_qemu_user()
+    'qemu-i386-static'
+    >>> get_qemu_user(arch='thumb')
+    'qemu-arm-static'
+    """
+    arch   = get_qemu_arch()
+    normal = 'qemu-' + arch
+    static = normal + '-static'
+
+    if misc.which(static):
+        return static
+
+    if misc.which(normal):
+        return normal
+
+    log.error("Neither %r nor %r are available" % (normal, static))
