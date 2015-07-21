@@ -521,12 +521,13 @@ class GadgetFinder(object):
         allgadgets = []
         insns_hashtable = []
 
+        md = self.capstone.Cs(arch, mode)
+        md.detail = True
+
         for gad in gadget_re:
             allRef = [m.start() for m in re.finditer(gad[C_OP], section.data())]
             for ref in allRef:
                 for i in range(self.depth):
-                    md = self.capstone.Cs(arch, mode)
-                    md.detail = True
                     back_bytes = i * gad[C_ALIGN]
                     section_start = ref - back_bytes
                     start_address = section.header.p_vaddr + section_start
@@ -536,62 +537,32 @@ class GadgetFinder(object):
                     decodes = md.disasm(section.data()[section_start : ref + gad[C_SIZE]],
                                         start_address)
 
-                    insns = []
                     decodes = list(decodes)
+                    insns = []
                     for decode in decodes:
                         insns.append((decode.mnemonic + " " + decode.op_str).strip())
 
                     if len(insns) > 0:
                         if (start_address % gad[C_ALIGN]) == 0:
-                            reg     = {}
-                            move    = 0
                             address = start_address
                             if mode == self.capstone.CS_MODE_THUMB:
                                 address = address | 1
 
                             bytes   = section.data()[ref - (i*gad[C_ALIGN]):ref+gad[C_SIZE]]
-                            onegad = Gadget(address, insns, reg, move, bytes)
-                            insns_hash = hashlib.sha1("; ".join(insns)).hexdigest()
-                            if insns_hash in insns_hashtable:
-                                continue
+                            onegad = Gadget(address, insns, {}, 0, bytes)
                             if not self.__passClean(decodes):
                                 continue
 
                             if self.need_filter:
                                 if self.arch == self.capstone.CS_ARCH_X86:
-                                    onegad = self.__filter_for_x86_big_binary(onegad)
+                                    onegad = filter_for_x86_big_binary(onegad)
                                 elif self.arch == self.capstone.CS_ARCH_ARM:
-                                    onegad = self.__filter_for_arm_big_binary(onegad)
-
-                            insns_hashtable.append(insns_hash)
+                                    onegad = filter_for_arm_big_binary(onegad)
 
                             if onegad:
                                 allgadgets += [onegad]
 
         return allgadgets
-
-    def __filter_for_x86_big_binary(self, gadget):
-        '''Filter gadgets for big binary.
-        '''
-        new = None
-        pop   = re.compile(r'^pop (.{3})')
-        add   = re.compile(r'^add .sp, (\S+)$')
-        ret   = re.compile(r'^ret$')
-        leave = re.compile(r'^leave$')
-        mov   = re.compile(r'^mov (.{3}), (.{3})')
-        xchg  = re.compile(r'^xchg (.{3}), (.{3})')
-        int80 = re.compile(r'int +0x80')
-        syscall = re.compile(r'^syscall$')
-        sysenter = re.compile(r'^sysenter$')
-
-        valid = lambda insn: any(map(lambda pattern: pattern.match(insn),
-            [pop,add,ret,leave,xchg,mov,int80,syscall,sysenter]))
-
-        insns = gadget.insns
-        if all(map(valid, insns)):
-            new = gadget
-
-        return new
 
     def __simplify_x86(self, gadgets):
         """Simplify gadgets, reserve minimizing gadgets set.
@@ -613,27 +584,6 @@ class GadgetFinder(object):
                    pop_r8, pop_r9, leave, int80, syscall, sysenter]
 
         return simplify(gadgets, re_list)
-
-
-    def __filter_for_arm_big_binary(self, gadget):
-        '''Filter gadgets for big binary.
-        '''
-        new = None
-        poppc = re.compile(r'^pop \{.*pc\}$')
-        blx   = re.compile(r'^blx r[0-9]$')
-        bx    = re.compile(r'^bx r[0-9]$')
-        poplr = re.compile(r'^pop \{.*lr\}$')
-        #mov   = re.compile(r'^mov (.{2}), (.{2})')
-        svc   = re.compile(r'^svc$')
-
-        valid = lambda insn: any(map(lambda pattern: pattern.match(insn),
-            [poppc,blx,svc,bx,poplr,svc]))
-
-        insns = gadget.insns
-        if all(map(valid, insns)):
-            new = gadget
-
-        return new
 
 
     def __simplify_arm(self, gadgets):
@@ -835,3 +785,46 @@ def simplify(gadgets, re_list):
             item_01 = i[0]
             out.append(gadgets_dict[item_01])
     return out
+
+def filter_for_x86_big_binary(gadget):
+    '''Filter gadgets for big binary.
+    '''
+    new = None
+    pop   = re.compile(r'^pop (.{3})')
+    add   = re.compile(r'^add .sp, (\S+)$')
+    ret   = re.compile(r'^ret$')
+    leave = re.compile(r'^leave$')
+    mov   = re.compile(r'^mov (.{3}), (.{3})')
+    xchg  = re.compile(r'^xchg (.{3}), (.{3})')
+    int80 = re.compile(r'int +0x80')
+    syscall = re.compile(r'^syscall$')
+    sysenter = re.compile(r'^sysenter$')
+
+    valid = lambda insn: any(map(lambda pattern: pattern.match(insn),
+        [pop,add,ret,leave,xchg,mov,int80,syscall,sysenter]))
+
+    insns = gadget.insns
+    if all(map(valid, insns)):
+        new = gadget
+
+    return new
+
+def filter_for_arm_big_binary(gadget):
+    '''Filter gadgets for big binary.
+    '''
+    new = None
+    poppc = re.compile(r'^pop \{.*pc\}$')
+    blx   = re.compile(r'^blx r[0-9]$')
+    bx    = re.compile(r'^bx r[0-9]$')
+    poplr = re.compile(r'^pop \{.*lr\}$')
+    #mov   = re.compile(r'^mov (.{2}), (.{2})')
+    svc   = re.compile(r'^svc$')
+
+    valid = lambda insn: any(map(lambda pattern: pattern.match(insn),
+        [poppc,blx,svc,bx,poplr,svc]))
+
+    insns = gadget.insns
+    if all(map(valid, insns)):
+        new = gadget
+
+    return new
