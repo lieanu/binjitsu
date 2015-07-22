@@ -488,13 +488,14 @@ class GadgetFinder(object):
                         self.classifier = GadgetClassifier(arch, mode)
                         gg += find_all_gadgets_multi_process(seg, gadget_re, elf, arch, mode, self.need_filter)
 
-                #gg = self.__deduplicate(gg)
 
                 if self.need_filter:
                     if self.arch == CS_ARCH_X86:
                         gg = self.__simplify_x86(gg)
                     elif self.arch == CS_ARCH_ARM:
                         gg = self.__simplify_arm(gg)
+                else:
+                    gg = self.__deduplicate(gg)
 
                 temp = [self.classifier.classify(gadget) for gadget in gg]
                 gg = [ gadget for gadget in temp if gadget]
