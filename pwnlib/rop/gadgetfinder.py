@@ -15,18 +15,21 @@ from ..log     import getLogger
 from ..elf     import ELF
 from .gadgets  import Gadget, Mem
 
+from multiprocessing import Pool
 from BTrees.OOBTree import OOBTree
 from amoco.cas.expressions import *
 from z3          import *
 from collections import OrderedDict
 from operator    import itemgetter
 from capstone    import CS_ARCH_X86, CS_ARCH_ARM, CS_MODE_32, CS_MODE_64, CS_MODE_ARM, CS_MODE_THUMB
-
+from capstone    import Cs, CS_GRP_JUMP, CS_GRP_RET, CS_GRP_CALL, CS_GRP_INT, CS_GRP_IRET
+from itertools   import repeat
 
 log = getLogger(__name__)
 
 # File size more than 100kb, should be filter for performance trade off
 MAX_SIZE = 200
+
 
 class GadgetMapper(object):
     r"""Get the gadgets mapper in symbolic expressions.
@@ -370,9 +373,6 @@ class GadgetFinder(object):
     @LocalContext
     def __init__(self, input, arch="i386", gadget_filter="all", depth=10):
 
-        import capstone
-        self.capstone = capstone
-
         if input:
             if isinstance(input, ELF):
                 elfs = [input]
@@ -481,19 +481,19 @@ class GadgetFinder(object):
                 gg = []
                 for seg in elf.executable_segments:
                     self.classifier = GadgetClassifier(self.arch, self.mode)
-                    gg += self.__find_all_gadgets(seg, self.gadget_re, elf, self.arch, self.mode)
+                    gg += find_all_gadgets_multi_process(seg, self.gadget_re, elf, self.arch, self.mode, self.need_filter)
 
-                    if self.arch == self.capstone.CS_ARCH_ARM:
+                    if self.arch == CS_ARCH_ARM:
                         arch, mode, gadget_re = self.arch_mode_gadget["thumb"]
                         self.classifier = GadgetClassifier(arch, mode)
-                        gg += self.__find_all_gadgets(seg, gadget_re, elf, arch, mode)
+                        gg += find_all_gadgets_multi_process(seg, gadget_re, elf, arch, mode, self.need_filter)
 
-                gg = self.__deduplicate(gg)
+                #gg = self.__deduplicate(gg)
 
                 if self.need_filter:
-                    if self.arch == self.capstone.CS_ARCH_X86:
+                    if self.arch == CS_ARCH_X86:
                         gg = self.__simplify_x86(gg)
-                    elif self.arch == self.capstone.CS_ARCH_ARM:
+                    elif self.arch == CS_ARCH_ARM:
                         gg = self.__simplify_arm(gg)
 
                 temp = [self.classifier.classify(gadget) for gadget in gg]
@@ -511,58 +511,6 @@ class GadgetFinder(object):
 
         return out
 
-    def __find_all_gadgets(self, section, gadget_re, elf, arch, mode):
-        '''Find gadgets like ROPgadget do.
-        '''
-        C_OP = 0
-        C_SIZE = 1
-        C_ALIGN = 2
-
-        allgadgets = []
-        insns_hashtable = []
-
-        md = self.capstone.Cs(arch, mode)
-        md.detail = True
-
-        for gad in gadget_re:
-            allRef = [m.start() for m in re.finditer(gad[C_OP], section.data())]
-            for ref in allRef:
-                for i in range(self.depth):
-                    back_bytes = i * gad[C_ALIGN]
-                    section_start = ref - back_bytes
-                    start_address = section.header.p_vaddr + section_start
-                    if elf.elftype == 'DYN':
-                        start_address = elf.address + start_address
-
-                    decodes = md.disasm(section.data()[section_start : ref + gad[C_SIZE]],
-                                        start_address)
-
-                    decodes = list(decodes)
-                    insns = []
-                    for decode in decodes:
-                        insns.append((decode.mnemonic + " " + decode.op_str).strip())
-
-                    if len(insns) > 0:
-                        if (start_address % gad[C_ALIGN]) == 0:
-                            address = start_address
-                            if mode == self.capstone.CS_MODE_THUMB:
-                                address = address | 1
-
-                            bytes   = section.data()[ref - (i*gad[C_ALIGN]):ref+gad[C_SIZE]]
-                            onegad = Gadget(address, insns, {}, 0, bytes)
-                            if not self.__passClean(decodes):
-                                continue
-
-                            if self.need_filter:
-                                if self.arch == self.capstone.CS_ARCH_X86:
-                                    onegad = filter_for_x86_big_binary(onegad)
-                                elif self.arch == self.capstone.CS_ARCH_ARM:
-                                    onegad = filter_for_arm_big_binary(onegad)
-
-                            if onegad:
-                                allgadgets += [onegad]
-
-        return allgadgets
 
     def __simplify_x86(self, gadgets):
         """Simplify gadgets, reserve minimizing gadgets set.
@@ -623,73 +571,6 @@ class GadgetFinder(object):
 
         return simplify(gadgets, re_list)
 
-
-    def __checkMultiBr(self, decodes, branch_groups):
-        """Caculate branch number for __passClean().
-        """
-        count = 0
-        ldm     = re.compile(r"^ldm.*sp!, \{.*\}")
-        pop_pc  = re.compile('^pop.* \{.*pc\}')
-        for inst in decodes:
-            insns = inst.mnemonic + " " + inst.op_str
-            if pop_pc.match(insns):
-                count += 1
-            elif ldm.match(insns):
-                count += 1
-
-            for group in branch_groups:
-                if group in inst.groups:
-                    count += 1
-        return count
-
-    def __passClean(self, decodes, multibr=False):
-        """Filter gadgets with two more blocks.
-        """
-
-        branch_groups = [self.capstone.CS_GRP_JUMP,
-                         self.capstone.CS_GRP_CALL,
-                         self.capstone.CS_GRP_RET,
-                         self.capstone.CS_GRP_INT,
-                         self.capstone.CS_GRP_IRET]
-
-        # "pop {.*pc}" for arm
-        # Because Capstone cannot identify this instruction as Branch instruction
-        blx     = re.compile('^blx ..$')
-        pop_pc  = re.compile('^pop \{.*pc\}')
-        call    = re.compile(r'^call ...$')
-        int80   = re.compile(r'int +0x80')
-        ret     = re.compile(r'^ret$')
-        svc     = re.compile(r'^svc$')
-        ldm     = re.compile(r"^ldm.*sp!, \{.*\}")
-
-        first_instr = (decodes[0].mnemonic + " " + decodes[0].op_str)
-        last_instr  = (decodes[-1].mnemonic + " " + decodes[-1].op_str)
-
-        # For gadgets as follows:
-        # 1. call reg; xxx; ret
-        # 2. blx reg; xxx; pop {.*pc}
-        # 3. int 0x80; xxx; ret
-        # 4. svc; xxx; pop {.*pc}
-        if call.match(first_instr) and ret.match(last_instr):
-            return True
-        if blx.match(first_instr) and pop_pc.match(last_instr):
-            return True
-        if int80.match(first_instr) and ret.match(last_instr):
-            return True
-        if svc.match(first_instr) and pop_pc.match(last_instr):
-            return True
-
-        if len(decodes) > 5:
-            return False
-
-        if (not pop_pc.match(last_instr)) and (not ldm.match(last_instr)) and (not (set(decodes[-1].groups) & set(branch_groups))):
-            return False
-
-        branch_num = self.__checkMultiBr(decodes, branch_groups)
-        if not multibr and (branch_num > 1 or branch_num == 0):
-            return False
-
-        return True
 
     def __deduplicate(self, gadgets):
         new, insts = [], []
@@ -785,6 +666,154 @@ def simplify(gadgets, re_list):
             item_01 = i[0]
             out.append(gadgets_dict[item_01])
     return out
+
+def find_all_gadgets_multi_process(section, gadget_re, elf, arch, mode, need_filter):
+    '''Find gadgets like ROPgadget do.
+    '''
+    C_OP = 0
+
+    raw_data = section.data()
+    pvaddr = section.header.p_vaddr
+    elftype = elf.elftype
+    elf_base_addr = elf.address
+
+    pool = Pool()
+
+    arguments = []
+    for gad in gadget_re:
+        allRef = [m.start() for m in re.finditer(gad[C_OP], raw_data)]
+        arguments += zip(repeat(raw_data),
+                         repeat(pvaddr),
+                         repeat(elftype),
+                         repeat(elf_base_addr),
+                         repeat(arch),
+                         repeat(mode),
+                         repeat(gad),
+                         repeat(need_filter),
+                         allRef)
+    if not arguments:
+        return []
+
+    results = pool.map(find_single, arguments)
+    gadgets = []
+    for r in results:
+        gadgets += r
+    return gadgets
+
+
+def find_single((raw_data, pvaddr, elftype, elf_base_addr, arch, mode, gad, need_filter, ref)):
+    C_OP = 0
+    C_SIZE = 1
+    C_ALIGN = 2
+
+    allgadgets = []
+
+    md = Cs(arch, mode)
+    md.detail = True
+
+    for i in range(10):
+        back_bytes = i * gad[C_ALIGN]
+        section_start = ref - back_bytes
+        start_address = pvaddr + section_start
+        if elftype == 'DYN':
+            start_address = elf_base_addr + start_address
+
+        decodes = md.disasm(raw_data[section_start : ref + gad[C_SIZE]],
+                            start_address)
+
+        decodes = list(decodes)
+        insns = []
+        for decode in decodes:
+            insns.append((decode.mnemonic + " " + decode.op_str).strip())
+
+        if len(insns) > 0:
+            if (start_address % gad[C_ALIGN]) == 0:
+                address = start_address
+                if mode == CS_MODE_THUMB:
+                    address = address | 1
+
+                bytes   = raw_data[ref - (i*gad[C_ALIGN]):ref+gad[C_SIZE]]
+                onegad = Gadget(address, insns, {}, 0, bytes)
+                if not passClean(decodes):
+                    continue
+
+                if need_filter:
+                    if arch == CS_ARCH_X86:
+                        onegad = filter_for_x86_big_binary(onegad)
+                    elif arch == CS_ARCH_ARM:
+                        onegad = filter_for_arm_big_binary(onegad)
+
+                if onegad:
+                    allgadgets += [onegad]
+
+    return allgadgets
+
+def checkMultiBr(decodes, branch_groups):
+    """Caculate branch number for __passClean().
+    """
+    count = 0
+    ldm     = re.compile(r"^ldm.*sp!, \{.*\}")
+    pop_pc  = re.compile('^pop.* \{.*pc\}')
+    for inst in decodes:
+        insns = inst.mnemonic + " " + inst.op_str
+        if pop_pc.match(insns):
+            count += 1
+        elif ldm.match(insns):
+            count += 1
+
+        for group in branch_groups:
+            if group in inst.groups:
+                count += 1
+    return count
+
+def passClean(decodes, multibr=False):
+    """Filter gadgets with two more blocks.
+    """
+
+    branch_groups = [CS_GRP_JUMP,
+                     CS_GRP_CALL,
+                     CS_GRP_RET,
+                     CS_GRP_INT,
+                     CS_GRP_IRET]
+
+    # "pop {.*pc}" for arm
+    # Because Capstone cannot identify this instruction as Branch instruction
+    blx     = re.compile('^blx ..$')
+    pop_pc  = re.compile('^pop \{.*pc\}')
+    call    = re.compile(r'^call ...$')
+    int80   = re.compile(r'int +0x80')
+    ret     = re.compile(r'^ret$')
+    svc     = re.compile(r'^svc$')
+    ldm     = re.compile(r"^ldm.*sp!, \{.*\}")
+
+    first_instr = (decodes[0].mnemonic + " " + decodes[0].op_str)
+    last_instr  = (decodes[-1].mnemonic + " " + decodes[-1].op_str)
+
+    # For gadgets as follows:
+    # 1. call reg; xxx; ret
+    # 2. blx reg; xxx; pop {.*pc}
+    # 3. int 0x80; xxx; ret
+    # 4. svc; xxx; pop {.*pc}
+    if call.match(first_instr) and ret.match(last_instr):
+        return True
+    if blx.match(first_instr) and pop_pc.match(last_instr):
+        return True
+    if int80.match(first_instr) and ret.match(last_instr):
+        return True
+    if svc.match(first_instr) and pop_pc.match(last_instr):
+        return True
+
+    if len(decodes) > 5:
+        return False
+
+    if (not pop_pc.match(last_instr)) and (not ldm.match(last_instr)) and (not (set(decodes[-1].groups) & set(branch_groups))):
+        return False
+
+    branch_num = checkMultiBr(decodes, branch_groups)
+    if not multibr and (branch_num > 1 or branch_num == 0):
+        return False
+
+    return True
 
 def filter_for_x86_big_binary(gadget):
     '''Filter gadgets for big binary.
