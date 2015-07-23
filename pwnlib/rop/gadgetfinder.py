@@ -48,9 +48,7 @@ class GadgetMapper(object):
             import amoco.arch.x86.cpu_x86 as cpu
         elif arch == CS_ARCH_X86 and mode == CS_MODE_64:
             import amoco.arch.x64.cpu_x64 as cpu
-        elif arch == CS_ARCH_ARM and mode == CS_MODE_ARM:
-            import amoco.arch.arm.cpu_armv7 as cpu
-        elif arch == CS_ARCH_ARM and mode == CS_MODE_THUMB:
+        elif arch == CS_ARCH_ARM:
             import amoco.arch.arm.cpu_armv7 as cpu
         else:
             raise Exception("Unsupported archtecture %s." % arch)
@@ -121,10 +119,10 @@ class GadgetMapper(object):
             # If the last instruction is a call, we need to "neutralize" its effect
             # in the final mapper, otherwise the mapper thinks the block after that one
             # is actually 'the inside' of the call, which is not the case with ROP gadgets
-            if block.instr[-1].mnemonic.lower() == 'call':
-                p.cpu.i_RET(None, block.map)
-
             try:
+                if block.instr[-1].mnemonic.lower() == 'call':
+                    p.cpu.i_RET(None, block.map)
+
                 mp >>= block.map
             except Exception as e:
                 pass
@@ -497,8 +495,9 @@ class GadgetFinder(object):
                 else:
                     gg = self.__deduplicate(gg)
 
-                temp = [self.classifier.classify(gadget) for gadget in gg]
-                gg = [ gadget for gadget in temp if gadget]
+                if self.need_filter:
+                    temp = [self.classifier.classify(gadget) for gadget in gg]
+                    gg = [ gadget for gadget in temp if gadget]
 
                 for gadget in gg:
                     out[gadget.address] = gadget
@@ -512,6 +511,16 @@ class GadgetFinder(object):
 
         return out
 
+
+    def __deduplicate(self, gadgets):
+        new, insts = [], []
+        for gadget in gadgets:
+            insns = hex(gadget.address) + ": " + "; ".join(gadget.insns)
+            if insns in insts:
+                continue
+            insts.append(insns)
+            new += [gadget]
+        return new
 
     def __simplify_x86(self, gadgets):
         """Simplify gadgets, reserve minimizing gadgets set.
@@ -571,17 +580,6 @@ class GadgetFinder(object):
         re_list = [blx_pop, blx_pop_fine, pop_r0, pop_r0_r1, pop_r0_r1_r2, pop_r0_r1_r2_r3, bx, pop_lr, svc]
 
         return simplify(gadgets, re_list)
-
-
-    def __deduplicate(self, gadgets):
-        new, insts = [], []
-        for gadget in gadgets:
-            insns = hex(gadget.address) + ": " + "; ".join(gadget.insns)
-            if insns in insts:
-                continue
-            insts.append(insns)
-            new += [gadget]
-        return new
 
 
 class GadgetDatabase(object):
@@ -743,6 +741,10 @@ def find_single((raw_data, pvaddr, elftype, elf_base_addr, arch, mode, gad, need
                         onegad = filter_for_x86_big_binary(onegad)
                     elif arch == CS_ARCH_ARM:
                         onegad = filter_for_arm_big_binary(onegad)
+
+                if (not need_filter) and onegad:
+                    classifier = GadgetClassifier(arch, mode)
+                    onegad = classifier.classify(onegad)
 
                 if onegad:
                     allgadgets += [onegad]
