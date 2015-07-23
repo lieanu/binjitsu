@@ -119,10 +119,10 @@ class GadgetMapper(object):
             # If the last instruction is a call, we need to "neutralize" its effect
             # in the final mapper, otherwise the mapper thinks the block after that one
             # is actually 'the inside' of the call, which is not the case with ROP gadgets
-            try:
-                if block.instr[-1].mnemonic.lower() == 'call':
-                    p.cpu.i_RET(None, block.map)
+            if block.instr[-1].mnemonic.lower() == 'call':
+                p.cpu.i_RET(None, block.map)
 
+            try:
                 mp >>= block.map
             except Exception as e:
                 pass
