@@ -199,6 +199,8 @@ import sys
 import tempfile
 import random
 
+from multiprocessing import Pool, cpu_count
+from itertools  import repeat
 from operator   import itemgetter
 
 from ..         import abi
@@ -1580,42 +1582,44 @@ class ROP(object):
         Gadget03: [],
         Gadget04: []}
         '''
-        gadget_graph = {}
-        for gad_1 in gadgets.values():
-            gadget_graph[gad_1] = set()
-            outputs = []
-            for i in gad_1.regs.keys():
-                if isinstance(i, (str, unicode)) and ("ip" not in i and "pc" not in i):
 
-                    # Drop gadgets which set to themselves.
-                    # For {"esp":["esp"]} or {"eax":"eax"}
-                    in_reg = gad_1.regs[i]
-                    if isinstance(in_reg, list):
-                        in_reg = "".join(in_reg)
+        gadget_input = {}
+        for gad in gadgets.values():
+            inputs = []
+            for k, i in gad.regs.items():
 
-                    if in_reg != i:
-                        outputs.append(i)
+                # Drop gadgets which set to themselves.
+                # For {"esp":["esp"]} or {"eax":"eax"}
+                if isinstance(i, (str, unicode)):
+                    if k != i:
+                        inputs.append(i)
+                elif isinstance(i, list):
+                    if k != "".join(i):
+                        inputs += i
 
-            for gad_2 in gadgets.values():
-                if gad_1 == gad_2:
-                    continue
-                inputs=[]
-                for k, i in gad_2.regs.items():
+            gadget_input[gad.address] = inputs
 
-                    # Drop gadgets which set to themselves.
-                    # For {"esp":["esp"]} or {"eax":"eax"}
-                    if isinstance(i, (str, unicode)):
-                        if k != i:
-                            inputs.append(i)
-                    elif isinstance(i, list):
-                        if k != "".join(i):
-                            inputs += i
+        pool = Pool()
 
-                inter = set(inputs) & set(outputs)
-                if len(inter) > 0:
-                    gadget_graph[gad_1].add(gad_2)
+        allgadgets = gadgets.values()
+        core_number = cpu_count()
+        # Need plus one, if not, we will miss some gadgets
+        interval = len(allgadgets)/core_number + 1
+        gad_inputs = [allgadgets[i*interval : (i+1)*interval] for i in range(core_number)]
 
-        return gadget_graph
+        arguments = zip(gad_inputs,
+                        repeat(gadgets),
+                        repeat(gadget_input))
+        if not arguments:
+            return {}
+
+        result = pool.map(build_graph_single, arguments)
+
+        out = {}
+        for x in result:
+            out.update(x)
+
+        return out
 
 
     def __build_top_sort(self, graph):
@@ -1787,3 +1791,45 @@ class ROP(object):
                 for new_path in self.__dfs(graph, node, end, path):
                     if new_path:
                         yield new_path
+
+def build_graph_single((gad_inputs, gadgets, gadget_input)):
+    """Child process for build_graph() method.
+    """
+    gadget_graph = {}
+    for gad_1 in gad_inputs:
+        gadget_graph[gad_1] = set()
+        outputs = []
+        for i in gad_1.regs.keys():
+            if "ip" in i or "pc" in i:
+                continue
+
+            if isinstance(i, (str, unicode)):
+                # Drop gadgets which set to themselves.
+                # For {"esp":["esp"]} or {"eax":"eax"}
+                in_reg = gad_1.regs[i]
+                if isinstance(in_reg, list):
+                    in_reg = "".join(in_reg)
+
+                if in_reg != i:
+                    outputs.append(i)
+
+        if not outputs:
+            continue
+
+        for gad_2 in gadgets.values():
+            if gad_1 == gad_2:
+                continue
+
+            inputs = gadget_input[gad_2.address]
+            if not inputs:
+                continue
+
+            flag = False
+            for j in inputs:
+                if j in outputs:
+                    flag = True
+                    break
+            if flag:
+                gadget_graph[gad_1].add(gad_2)
+
+    return gadget_graph
