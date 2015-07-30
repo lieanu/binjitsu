@@ -191,17 +191,18 @@ Let's try it out!
     'hello\n'
 """
 import collections
-import copy
 import hashlib
 import os
 import re
 import sys
 import tempfile
 import random
+import networkx
 
 from multiprocessing import Pool, cpu_count
 from itertools  import repeat
 from operator   import itemgetter
+from copy       import deepcopy
 
 from ..         import abi
 from ..         import constants
@@ -427,6 +428,10 @@ class ROP(object):
 
         self.gadget_graph = self.build_graph(self.gadgets)
 
+        self._top_sorted = networkx.topological_sort(self.gadget_graph, reverse=True)
+
+        self.ret_to_stack_gadget = None
+
     @staticmethod
     @LocalContext
     def from_blob(blob, *a, **kw):
@@ -449,25 +454,6 @@ class ROP(object):
                       "amd64"   : "rsp",
                       "arm"     : "sp"}[self.arch]
 
-    def __init_classify_and_solver(self):
-        """
-        Classify and solver gadgets as needed.
-        Because of `amoco` has a large initialization-time penalty.
-        """
-        if not self.initialized:
-
-            self._global_delete_gadget = {}
-            ggh = copy.deepcopy(self.gadget_graph)
-
-            self._top_sorted = self.__build_top_sort(ggh)
-
-            for d, dlist in self._global_delete_gadget.items():
-                for i in dlist:
-                    self.gadget_graph[d].remove(i)
-
-            self.ret_to_stack_gadget = None
-
-            self.initialized = True
 
     def setRegisters_print(self, condition):
         for r, gadgets in self.setRegisters(condition).items():
@@ -649,9 +635,6 @@ class ROP(object):
             0xdeadbeef
         """
 
-        # init GadgetSolver and GadgetClassify
-        self.__init_classify_and_solver()
-
         out = []
 
         # Such as: {path_md5_hash: path}
@@ -789,7 +772,7 @@ class ROP(object):
 
         # Top sort to decide the reg order.
         ordered_out = collections.OrderedDict(sorted(out,
-                      key=lambda t: self._top_sorted[::-1].index(t[1][0][-1])))
+                      key=lambda t: self._top_sorted.index(t[1][0][-1].address)))
 
         ordered_out = self.flat_as_on_stack(ordered_out, additional_conditions)
 
@@ -1583,6 +1566,9 @@ class ROP(object):
         Gadget04: []}
         '''
 
+        G = networkx.DiGraph()
+        G.add_nodes_from(gadgets.keys())
+
         gadget_input = {}
         for gad in gadgets.values():
             inputs = []
@@ -1603,6 +1589,7 @@ class ROP(object):
 
         allgadgets = gadgets.values()
         core_number = cpu_count()
+
         # Need plus one, if not, we will miss some gadgets
         interval = len(allgadgets)/core_number + 1
         gad_inputs = [allgadgets[i*interval : (i+1)*interval] for i in range(core_number)]
@@ -1615,83 +1602,14 @@ class ROP(object):
 
         result = pool.map(build_graph_single, arguments)
 
-        out = {}
-        for x in result:
-            out.update(x)
+        results = reduce(lambda x, y: x+y, result)
 
-        return out
+        for x in results:
+            G.add_edge(*x)
+            if not networkx.is_directed_acyclic_graph(G):
+                G.remove_edge(*x)
 
-
-    def __build_top_sort(self, graph):
-        """
-        Topological sort a graph.
-
-        Arguments:
-
-            graph(dict):
-                A simple example : graph = {'eax': ['ebx'], 'ebx': ['eax'], 'edx': ['eax']}
-                May be cycles in graph. we need to handle it.
-
-        Returns:
-            top_sorted(list):
-                such as: ["edx", "eax", "ebx"]
-        """
-        top_sorted = []
-        indegree_zero = []
-
-        #Inital indegree list will zero.
-        indegree = {}
-        for k, v in graph.items():
-            indegree[k] = 0
-            for l in v:
-                indegree[l] = 0
-
-        #Caculate indegree, for gadget graph.
-        for g, glist in graph.items():
-            for gadget in glist:
-                indegree[gadget] += 1
-
-        #inital indegree_zero list.
-        for g, indeg in indegree.items():
-            if indeg == 0:
-                indegree_zero.append(g)
-
-        # TOP sort
-        while len(indegree_zero) > 0:
-            n = indegree_zero.pop()
-            top_sorted.append(n)
-
-            if n not in graph.keys():
-                continue
-
-            for m in graph[n]:
-                indegree[m] -= 1
-                if indegree[m] == 0:
-                    indegree_zero.append(m)
-            del(graph[n])
-
-        if len(graph) == 0:
-            return top_sorted
-
-        # Recursive top sort.
-        for g, indeg in indegree.items():
-            if indeg >= 1:
-                for k, glist in graph.items():
-                    for h in glist.copy():
-                        if h == g:
-                            graph[k].remove(h)
-                            #record the deleted edge of cirles.
-                            if k not in self._global_delete_gadget.keys():
-                                self._global_delete_gadget[k] = set()
-                            self._global_delete_gadget[k].add(h)
-
-        # Recurisve top sorting.
-        last_result = self.__build_top_sort(graph)
-        if not last_result:
-            last_result = []
-
-        return top_sorted + last_result
-
+        return G
 
     def search_path(self, src, regs):
         '''Search paths, from src to regs.
@@ -1747,9 +1665,29 @@ class ROP(object):
         if len(start) != 0 and len(end) != 0:
             for s in list(start):
                 for e in list(end):
-                    path = self.__dfs(self.gadget_graph, s, e)
-                    paths += list(path)
+                    if s.address  == e.address:
+                        paths.append([s.address])
+                    else:
+                        try:
+                            path = networkx.all_shortest_paths(self.gadget_graph,
+                                                               source=s.address,
+                                                               target=e.address)
+                            paths += list(path)
+                        except networkx.exception.NetworkXNoPath:
+                            continue
 
+        outs = []
+        for path in paths:
+            out = []
+            for p in path:
+                out.append(self.gadgets[p])
+            outs.append(out)
+
+        paths = outs
+
+        paths = sorted(paths,
+                key=lambda path: len(" + ".join(["; ".join(gad.insns) for gad in path])))[:10]
+                #key=lambda path: len(path))[:10]
         # Give every reg a random num
         cond = {}
         for reg in regs:
@@ -1768,36 +1706,14 @@ class ROP(object):
             if out:
                 path_filted.append(path)
 
-        paths = sorted(path_filted,
-                key=lambda path: len(" + ".join(["; ".join(gad.insns) for gad in path])))
+        return path_filted
 
-        if not paths:
-            return None
-
-        return paths
-
-
-    def __dfs(self, graph, start, end, path=[]):
-        '''DFS for find a path in any graph.
-        '''
-        path = path + [start]
-
-        if start == end:
-            yield path
-        if not graph.has_key(start):
-            return
-        for node in graph[start]:
-            if node not in path:
-                for new_path in self.__dfs(graph, node, end, path):
-                    if new_path:
-                        yield new_path
 
 def build_graph_single((gad_inputs, gadgets, gadget_input)):
     """Child process for build_graph() method.
     """
-    gadget_graph = {}
+    edges = []
     for gad_1 in gad_inputs:
-        gadget_graph[gad_1] = set()
         outputs = []
         for i in gad_1.regs.keys():
             if "ip" in i or "pc" in i:
@@ -1830,6 +1746,6 @@ def build_graph_single((gad_inputs, gadgets, gadget_input)):
                     flag = True
                     break
             if flag:
-                gadget_graph[gad_1].add(gad_2)
+                edges.append((gad_1.address, gad_2.address))
 
-    return gadget_graph
+    return edges

@@ -515,7 +515,7 @@ class GadgetFinder(object):
     def __deduplicate(self, gadgets):
         new, insts = [], []
         for gadget in gadgets:
-            insns = hex(gadget.address) + ": " + "; ".join(gadget.insns)
+            insns = "; ".join(gadget.insns)
             if insns in insts:
                 continue
             insts.append(insns)
@@ -736,11 +736,10 @@ def find_single((raw_data, pvaddr, elftype, elf_base_addr, arch, mode, gad, need
                 if not passClean(decodes):
                     continue
 
-                if need_filter:
-                    if arch == CS_ARCH_X86:
-                        onegad = filter_for_x86_big_binary(onegad)
-                    elif arch == CS_ARCH_ARM:
-                        onegad = filter_for_arm_big_binary(onegad)
+                if arch == CS_ARCH_X86:
+                    onegad = filter_for_x86_big_binary(onegad)
+                elif arch == CS_ARCH_ARM:
+                    onegad = filter_for_arm_big_binary(onegad)
 
                 if (not need_filter) and onegad:
                     classifier = GadgetClassifier(arch, mode)
@@ -823,17 +822,23 @@ def filter_for_x86_big_binary(gadget):
     '''
     new = None
     pop   = re.compile(r'^pop (.{3})')
-    add   = re.compile(r'^add .sp, (\S+)$')
+    add   = re.compile(r'^add .sp, (\S+)')
     ret   = re.compile(r'^ret$')
     leave = re.compile(r'^leave$')
-    mov   = re.compile(r'^mov (.{3}), (.{3})')
-    xchg  = re.compile(r'^xchg (.{3}), (.{3})')
+    mov   = re.compile(r'^mov (.{3}), (.{3})$')
+    xchg  = re.compile(r'^xchg (.{3}), (.{3})$')
     int80 = re.compile(r'int +0x80')
     syscall = re.compile(r'^syscall$')
     sysenter = re.compile(r'^sysenter$')
+    call  = re.compile(r'^call (.{3})$')
+    jmp   = re.compile(r'^jmp (.{3})$')
+    push  = re.compile(r'^push (.{3})')
+    dec   = re.compile(r'^dec (.{3})')
+    inc   = re.compile(r'^inc (.{3})')
+
 
     valid = lambda insn: any(map(lambda pattern: pattern.match(insn),
-        [pop,add,ret,leave,xchg,mov,int80,syscall,sysenter]))
+        [pop,add,ret,leave,xchg,mov,int80,syscall,sysenter,call,jmp,push,dec,inc]))
 
     insns = gadget.insns
     if all(map(valid, insns)):
@@ -849,11 +854,12 @@ def filter_for_arm_big_binary(gadget):
     blx   = re.compile(r'^blx r[0-9]$')
     bx    = re.compile(r'^bx r[0-9]$')
     poplr = re.compile(r'^pop \{.*lr\}$')
-    #mov   = re.compile(r'^mov (.{2}), (.{2})')
+    mov   = re.compile(r'^mov (.{2}), (.{2})')
     svc   = re.compile(r'^svc$')
+    add   = re.compile(r'^add (.{2}).*')
 
     valid = lambda insn: any(map(lambda pattern: pattern.match(insn),
-        [poppc,blx,svc,bx,poplr,svc]))
+        [poppc,blx,svc,bx,poplr,svc,add]))
 
     insns = gadget.insns
     if all(map(valid, insns)):
