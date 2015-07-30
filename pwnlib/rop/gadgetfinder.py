@@ -486,7 +486,6 @@ class GadgetFinder(object):
                         self.classifier = GadgetClassifier(arch, mode)
                         gg += find_all_gadgets_multi_process(seg, gadget_re, elf, arch, mode, self.need_filter)
 
-
                 if self.need_filter:
                     if self.arch == CS_ARCH_X86:
                         gg = self.__simplify_x86(gg)
@@ -835,10 +834,11 @@ def filter_for_x86_big_binary(gadget):
     push  = re.compile(r'^push (.{3})')
     dec   = re.compile(r'^dec (.{3})')
     inc   = re.compile(r'^inc (.{3})')
+    mov_ptr   = re.compile(r'^mov (.{3}), .word ptr \[(.{3}).*\]$')
 
 
     valid = lambda insn: any(map(lambda pattern: pattern.match(insn),
-        [pop,add,ret,leave,xchg,mov,int80,syscall,sysenter,call,jmp,push,dec,inc]))
+        [pop,add,ret,leave,xchg,mov,int80,syscall,sysenter,call,jmp,push,dec,inc,mov_ptr]))
 
     insns = gadget.insns
     if all(map(valid, insns)):
@@ -851,15 +851,15 @@ def filter_for_arm_big_binary(gadget):
     '''
     new = None
     poppc = re.compile(r'^pop \{.*pc\}$')
-    blx   = re.compile(r'^blx r[0-9]$')
-    bx    = re.compile(r'^bx r[0-9]$')
+    blx   = re.compile(r'^blx (.{2})$')
+    bx    = re.compile(r'^bx (.{2})$')
     poplr = re.compile(r'^pop \{.*lr\}$')
-    mov   = re.compile(r'^mov (.{2}), (.{2})')
+    mov   = re.compile(r'^mov (.{2}), (.{2})$')
     svc   = re.compile(r'^svc$')
     add   = re.compile(r'^add (.{2}).*')
 
     valid = lambda insn: any(map(lambda pattern: pattern.match(insn),
-        [poppc,blx,svc,bx,poplr,svc,add]))
+        [poppc,blx,bx,poplr,mov,svc,add]))
 
     insns = gadget.insns
     if all(map(valid, insns)):

@@ -499,15 +499,15 @@ class ROP(object):
             >>> rop = ROP(ELF.from_assembly(assembly))
             >>> con = {'eax':1, 'ebx':2, 'ecx':3}
             >>> rop.setRegisters_print(con)
-            <setting ebx>
-            0x10000000 pop eax; ret
-            0x2
-            0x10000002 mov ebx, eax; ret
             <setting ecx>
             0x10000000 pop eax; ret
             0x10000000
             0x10000005 pop ecx; call eax
             0x3
+            <setting ebx>
+            0x10000000 pop eax; ret
+            0x2
+            0x10000002 mov ebx, eax; ret
             <setting eax>
             0x10000000 pop eax; ret
             0x1
@@ -1687,7 +1687,7 @@ class ROP(object):
 
         paths = sorted(paths,
                 key=lambda path: len(" + ".join(["; ".join(gad.insns) for gad in path])))[:10]
-                #key=lambda path: len(path))[:10]
+
         # Give every reg a random num
         cond = {}
         for reg in regs:
